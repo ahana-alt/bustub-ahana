@@ -20,7 +20,7 @@ jobs:
         config:
           - {
               name: "Ubuntu 24.04 GCC",
-              os: "ubuntu-24.04",
+              os: "self-hosted",
               cc: "/usr/bin/gcc",
               cxx: "/usr/bin/g++",
               format: "/usr/bin/clang-format-15",
@@ -28,7 +28,7 @@ jobs:
             }
           - {
               name: "Ubuntu 24.04 Clang",
-              os: "ubuntu-24.04",
+              os: "self-hosted",
               cc: "/usr/bin/clang-15",
               cxx: "/usr/bin/clang++-15",
               format: "/usr/bin/clang-format-15",
@@ -40,12 +40,6 @@ jobs:
               format: "/opt/homebrew/opt/llvm@15/bin/clang-format",
               tidy: "/opt/homebrew/opt/llvm@15/bin/clang-tidy",
             }
-          - {
-              name: "macOS 15 (Sequoia) AppleClang",
-              os: macos-15,
-              format: "/opt/homebrew/opt/llvm@15/bin/clang-format",
-              tidy: "/opt/homebrew/opt/llvm@15/bin/clang-tidy",
-          }
     steps:
       - uses: actions/checkout@v2
 

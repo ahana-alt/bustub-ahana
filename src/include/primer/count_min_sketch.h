@@ -14,6 +14,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -103,6 +105,14 @@ class CountMinSketch {
   }
 
   /** @todo (student) can add their data structures that support count-min sketch operations */
+  // The 2D array of counters for the sketch.
+  std::vector<std::vector<uint32_t>> table_;
+
+  // A vector of locks, one for each row, for high-performance parallel Insert().
+  mutable std::vector<std::unique_ptr<std::mutex>> row_latches_;
+
+  // A single lock for thread-safety in whole-table operations (Merge, Clear, etc.).
+  mutable std::mutex latch_;
 };
 
 }  // namespace bustub

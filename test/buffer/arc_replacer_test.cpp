@@ -20,7 +20,7 @@
 
 namespace bustub {
 
-TEST(ArcReplacerTest, DISABLED_SampleTest) {
+TEST(ArcReplacerTest, SampleTest) {
   // for the sake of simplicity
   // we use (a, fb) to notate page a on frame b,
   // (a, _) to mark ghost page with page id a
@@ -102,7 +102,7 @@ TEST(ArcReplacerTest, DISABLED_SampleTest) {
   ASSERT_EQ(2, arc_replacer.Evict());
 }
 
-TEST(ArcReplacerTest, DISABLED_SampleTest2) {
+TEST(ArcReplacerTest, SampleTest2) {
   // Test a smaller capacity
   ArcReplacer arc_replacer(3);
   // Fill up the replacer
@@ -131,6 +131,7 @@ TEST(ArcReplacerTest, DISABLED_SampleTest2) {
   // the ghost list. Ghost page 2 should be driven out
   arc_replacer.RecordAccess(2, 1);
   arc_replacer.SetEvictable(2, true);
+
   ASSERT_EQ(2, arc_replacer.Size());
   // Now [(3,_)][(4,f3), (1,f2)]![][] p=0
 
@@ -141,6 +142,7 @@ TEST(ArcReplacerTest, DISABLED_SampleTest2) {
   // Now [][(4,f3), (1,f2)]![(3,f1)][] p=1
 
   // Make some more ghosts by evicting all pages again
+  // error here
   ASSERT_EQ(3, arc_replacer.Evict());
   ASSERT_EQ(2, arc_replacer.Evict());
   ASSERT_EQ(1, arc_replacer.Evict());

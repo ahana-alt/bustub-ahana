@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "storage/page/page_guard.h"
+#include <future>
 #include <memory>
 #include "buffer/arc_replacer.h"
 #include "common/macros.h"
@@ -38,7 +39,7 @@ ReadPageGuard::ReadPageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> fra
       replacer_(std::move(replacer)),
       bpm_latch_(std::move(bpm_latch)),
       disk_scheduler_(std::move(disk_scheduler)) {
-  UNIMPLEMENTED("TODO(P1): Add implementation.");
+  // UNIMPLEMENTED("TODO(P1): Add implementation.");
 }
 
 /**
@@ -56,7 +57,17 @@ ReadPageGuard::ReadPageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> fra
  *
  * @param that The other page guard.
  */
-ReadPageGuard::ReadPageGuard(ReadPageGuard &&that) noexcept {}
+ReadPageGuard::ReadPageGuard(ReadPageGuard &&that) noexcept {
+  page_id_ = that.page_id_;
+  frame_ = std::move(that.frame_);
+  replacer_ = std::move(that.replacer_);
+  bpm_latch_ = std::move(that.bpm_latch_);
+  disk_scheduler_ = std::move(that.disk_scheduler_);
+  is_valid_ = that.is_valid_;
+
+  that.is_valid_ = false;
+  that.frame_ = nullptr;
+}
 
 /**
  * @brief The move assignment operator for `ReadPageGuard`.
@@ -75,7 +86,20 @@ ReadPageGuard::ReadPageGuard(ReadPageGuard &&that) noexcept {}
  * @param that The other page guard.
  * @return ReadPageGuard& The newly valid `ReadPageGuard`.
  */
-auto ReadPageGuard::operator=(ReadPageGuard &&that) noexcept -> ReadPageGuard & { return *this; }
+auto ReadPageGuard::operator=(ReadPageGuard &&that) noexcept -> ReadPageGuard & {
+  if (this == &that) {
+    return *this;
+  }
+  Drop();
+  page_id_ = that.page_id_;
+  frame_ = std::move(that.frame_);
+  replacer_ = std::move(that.replacer_);
+  bpm_latch_ = std::move(that.bpm_latch_);
+  disk_scheduler_ = std::move(that.disk_scheduler_);
+  is_valid_ = that.is_valid_;
+  that.is_valid_ = false;
+  return *this;
+}
 
 /**
  * @brief Gets the page ID of the page this guard is protecting.
@@ -106,7 +130,32 @@ auto ReadPageGuard::IsDirty() const -> bool {
  *
  * TODO(P1): Add implementation.
  */
-void ReadPageGuard::Flush() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+void ReadPageGuard::Flush() {
+  // UNIMPLEMENTED("TODO(P1): Add implementation.");
+  // If the page is not dirty, there's nothing to flush.
+  if (!frame_->is_dirty_) {
+    return;
+  }
+
+  // 1. The promise's template argument must be <bool> to match the DiskRequest struct.
+  std::promise<bool> promise;
+  std::future<bool> future = promise.get_future();
+
+  // 2. Create a vector, as the Schedule method expects a vector of requests.
+  std::vector<DiskRequest> requests;
+
+  // 3. Initialize the DiskRequest correctly with is_write=true and move the promise.
+  requests.emplace_back(DiskRequest{true, const_cast<char *>(frame_->GetData()), page_id_, std::move(promise)});
+
+  // 4. Pass the vector of requests to the scheduler.
+  disk_scheduler_->Schedule(requests);
+
+  // 5. Wait for the background worker thread to complete the disk write.
+  future.get();
+
+  // 6. After a successful flush, the page is no longer dirty.
+  frame_->is_dirty_ = false;
+}
 
 /**
  * @brief Manually drops a valid `ReadPageGuard`'s data. If this guard is invalid, this function does nothing.
@@ -119,7 +168,18 @@ void ReadPageGuard::Flush() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
  *
  * TODO(P1): Add implementation.
  */
-void ReadPageGuard::Drop() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+void ReadPageGuard::Drop() {
+  // UNIMPLEMENTED("TODO(P1): Add implementation.");
+  if (!is_valid_) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(*bpm_latch_);
+  frame_->pin_count_--;
+  if (frame_->pin_count_ == 0) {
+    replacer_->SetEvictable(frame_->frame_id_, true);
+  }
+  is_valid_ = false;
+}
 
 /** @brief The destructor for `ReadPageGuard`. This destructor simply calls `Drop()`. */
 ReadPageGuard::~ReadPageGuard() { Drop(); }
@@ -149,7 +209,8 @@ WritePageGuard::WritePageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> f
       replacer_(std::move(replacer)),
       bpm_latch_(std::move(bpm_latch)),
       disk_scheduler_(std::move(disk_scheduler)) {
-  UNIMPLEMENTED("TODO(P1): Add implementation.");
+  // UNIMPLEMENTED("TODO(P1): Add implementation.");
+  frame_->is_dirty_ = true;
 }
 
 /**
@@ -167,7 +228,18 @@ WritePageGuard::WritePageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> f
  *
  * @param that The other page guard.
  */
-WritePageGuard::WritePageGuard(WritePageGuard &&that) noexcept {}
+WritePageGuard::WritePageGuard(WritePageGuard &&that) noexcept {
+  page_id_ = that.page_id_;
+  frame_ = std::move(that.frame_);
+  replacer_ = std::move(that.replacer_);
+  bpm_latch_ = std::move(that.bpm_latch_);
+  disk_scheduler_ = std::move(that.disk_scheduler_);
+  is_valid_ = that.is_valid_;
+
+  // Invalidate 'that' so its destructor does nothing
+  that.is_valid_ = false;
+  that.frame_ = nullptr;
+}
 
 /**
  * @brief The move assignment operator for `WritePageGuard`.
@@ -186,7 +258,21 @@ WritePageGuard::WritePageGuard(WritePageGuard &&that) noexcept {}
  * @param that The other page guard.
  * @return WritePageGuard& The newly valid `WritePageGuard`.
  */
-auto WritePageGuard::operator=(WritePageGuard &&that) noexcept -> WritePageGuard & { return *this; }
+auto WritePageGuard::operator=(WritePageGuard &&that) noexcept -> WritePageGuard & {
+  if (this == &that) {
+    return *this;
+  }
+  Drop();
+  page_id_ = that.page_id_;
+  frame_ = std::move(that.frame_);
+  // frame_->is_dirty_ = true;
+  replacer_ = std::move(that.replacer_);
+  bpm_latch_ = std::move(that.bpm_latch_);
+  disk_scheduler_ = std::move(that.disk_scheduler_);
+  is_valid_ = that.is_valid_;
+  that.is_valid_ = false;
+  return *this;
+}
 
 /**
  * @brief Gets the page ID of the page this guard is protecting.
@@ -225,7 +311,29 @@ auto WritePageGuard::IsDirty() const -> bool {
  *
  * TODO(P1): Add implementation.
  */
-void WritePageGuard::Flush() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+void WritePageGuard::Flush() {
+  // UNIMPLEMENTED("TODO(P1): Add implementation.");
+  if (!frame_->is_dirty_) {
+    return;
+  }
+
+  // 2. Create a promise/future pair to wait for the I/O to complete.
+  std::promise<bool> promise;
+  std::future<bool> future = promise.get_future();
+
+  // 3. Create a vector for the disk request.
+  std::vector<DiskRequest> requests;
+  requests.emplace_back(DiskRequest{true, frame_->GetDataMut(), page_id_, std::move(promise)});
+
+  // 4. Schedule the write request.
+  disk_scheduler_->Schedule(requests);
+
+  // 5. Wait for the write to finish.
+  future.get();
+
+  // 6. The page in memory now matches the page on disk, so it's no longer dirty.
+  frame_->is_dirty_ = false;
+}
 
 /**
  * @brief Manually drops a valid `WritePageGuard`'s data. If this guard is invalid, this function does nothing.
@@ -238,7 +346,19 @@ void WritePageGuard::Flush() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
  *
  * TODO(P1): Add implementation.
  */
-void WritePageGuard::Drop() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+void WritePageGuard::Drop() {
+  // UNIMPLEMENTED("TODO(P1): Add implementation.");
+  if (!is_valid_) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(*bpm_latch_);
+  frame_->pin_count_--;
+  if (frame_->pin_count_ == 0) {
+    replacer_->SetEvictable(frame_->frame_id_, true);
+  }
+  is_valid_ = false;
+  // frame_->is_dirty_ = true;
+}
 
 /** @brief The destructor for `WritePageGuard`. This destructor simply calls `Drop()`. */
 WritePageGuard::~WritePageGuard() { Drop(); }

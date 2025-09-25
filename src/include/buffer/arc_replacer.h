@@ -34,7 +34,7 @@ struct FrameStatus {
   frame_id_t frame_id_;
   bool evictable_;
   ArcStatus arc_status_;
-  FrameStatus(page_id_t pid, frame_id_t fid, bool ev, ArcStatus st)
+  FrameStatus(page_id_t pid, frame_id_t fid, bool ev, ArcStatus st)  // constructor signature
       : page_id_(pid), frame_id_(fid), evictable_(ev), arc_status_(st) {}
 };
 
@@ -77,11 +77,11 @@ class ArcReplacer {
   std::unordered_map<page_id_t, std::shared_ptr<FrameStatus>> ghost_map_;
 
   /* alive, evictable entries count */
-  [[maybe_unused]] size_t curr_size_{0};
+  size_t curr_size_{0};
   /* p as in original paper */
-  [[maybe_unused]] size_t mru_target_size_{0};
+  size_t mru_target_size_{0};
   /* c as in original paper */
-  [[maybe_unused]] size_t replacer_size_;
+  size_t replacer_size_;
   std::mutex latch_;
 
   // TODO(student): You can add member variables / functions as you like.

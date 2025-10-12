@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <filesystem>
 
+#include <random>
 #include "buffer/buffer_pool_manager.h"
 #include "gtest/gtest.h"
 #include "storage/page/page_guard.h"
@@ -79,6 +80,7 @@ TEST(BufferPoolManagerTest, DISABLED_PagePinEasyTest) {
     CopyString(page0_write.GetDataMut(), str0);
 
     auto page1_write_opt = bpm->CheckedWritePage(pageid1);
+    // std::cout<<"page1_write_opt: "<<page1_write_opt;
     ASSERT_TRUE(page1_write_opt.has_value());
     auto page1_write = std::move(page1_write_opt.value());  // NOLINT
     CopyString(page1_write.GetDataMut(), str1);
@@ -111,8 +113,10 @@ TEST(BufferPoolManagerTest, DISABLED_PagePinEasyTest) {
     const auto temp_page_id2 = bpm->NewPage();
     const auto temp_page2_opt = bpm->CheckedWritePage(temp_page_id2);
     ASSERT_TRUE(temp_page2_opt.has_value());
+    // std::cout<<"true?\n";
 
     ASSERT_FALSE(bpm->GetPinCount(pageid0).has_value());
+    // std::cout<<"true?\n";
     ASSERT_FALSE(bpm->GetPinCount(pageid1).has_value());
   }
 
@@ -317,7 +321,7 @@ TEST(BufferPoolManagerTest, DISABLED_ContentionTest) {
   thread1.join();
 }
 
-TEST(BufferPoolManagerTest, DISABLED_DeadlockTest) {
+TEST(BufferPoolManagerTest, DeadlockTest) {
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
   auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
 
@@ -357,7 +361,7 @@ TEST(BufferPoolManagerTest, DISABLED_DeadlockTest) {
   child.join();
 }
 
-TEST(BufferPoolManagerTest, DISABLED_EvictableTest) {
+TEST(BufferPoolManagerTest, EvictableTest) {
   // Test if the evictable status of a frame is always correct.
   const size_t rounds = 1000;
   const size_t num_readers = 8;
@@ -426,6 +430,141 @@ TEST(BufferPoolManagerTest, DISABLED_EvictableTest) {
       readers[i].join();
     }
   }
+}
+
+TEST(BufferPoolManagerTest, ConcurrentReaderWriterTest) {
+  // Small pool to force evictions while multiple readers/writers are active.
+  constexpr size_t kFrames = 16;
+  constexpr size_t kNumPages = 64;
+  constexpr size_t kNumWriters = 4;
+  constexpr size_t kNumReaders = 8;
+  constexpr size_t kWriterRounds = 1500;  // work per-writer
+  constexpr size_t kReaderRounds = 1500;  // work per-reader
+
+  auto disk_manager = std::make_shared<DiskManager>(db_fname);
+  auto bpm = std::make_shared<BufferPoolManager>(kFrames, disk_manager.get());
+
+  // Pre-allocate a universe of pages.
+  std::vector<page_id_t> page_ids;
+  page_ids.reserve(kNumPages);
+  for (size_t i = 0; i < kNumPages; i++) {
+    page_ids.push_back(bpm->NewPage());
+  }
+
+  // Shared epochs per page; writers bump after each successful write.
+  std::vector<std::atomic<uint32_t>> epochs(kNumPages);
+  for (auto &e : epochs) {
+    e.store(0, std::memory_order_relaxed);
+  }
+
+  // Deterministic page payload helpers.
+  auto write_pattern = [](char *dst, page_id_t pid, uint32_t epoch) {
+    // encode pid + epoch in first 8 bytes and fill rest with a deterministic pattern
+    std::memcpy(dst + 0, &pid, sizeof(pid));
+    std::memcpy(dst + 4, &epoch, sizeof(epoch));
+    for (size_t i = 8; i < BUSTUB_PAGE_SIZE; i++) {
+      dst[i] = static_cast<char>((pid + epoch + i) & 0xFF);
+    }
+  };
+  auto check_pattern_pid_only = [](const char *src, page_id_t expected_pid) -> bool {
+    page_id_t got_pid{0};
+    std::memcpy(&got_pid, src + 0, sizeof(got_pid));
+    return got_pid == expected_pid;
+  };
+
+  // Barrier-style start signal using cv/mutex (to match your test style).
+  std::mutex start_mu;
+  std::condition_variable start_cv;
+  bool start_flag = false;
+
+  // Launch writers.
+  std::vector<std::thread> writers;
+  writers.reserve(kNumWriters);
+  for (size_t t = 0; t < kNumWriters; t++) {
+    writers.emplace_back([&, t]() {
+      // wait for start
+      {
+        std::unique_lock<std::mutex> lk(start_mu);
+        while (!start_flag) {
+          start_cv.wait(lk);
+        }
+      }
+      for (size_t it = 0; it < kWriterRounds; it++) {
+        const size_t idx = (it + t) % kNumPages;
+        const page_id_t pid = page_ids[idx];
+
+        // Exclusive modify
+        auto w = bpm->WritePage(pid, AccessType::Unknown);
+        char *buf = w.GetDataMut();  // must set dirty internally
+        // choose next epoch
+        const uint32_t next_epoch = epochs[idx].load(std::memory_order_relaxed) + 1;
+        write_pattern(buf, pid, next_epoch);
+        // release (unpin)
+        w.Drop();
+
+        // publish epoch after bytes are written
+        epochs[idx].store(next_epoch, std::memory_order_release);
+
+        // occasionally flush to exercise safe flush path
+        if ((it % 127) == 0) {
+          (void)bpm->FlushPage(pid);
+        }
+      }
+    });
+  }
+
+  // Launch readers.
+  std::vector<std::thread> readers;
+  readers.reserve(kNumReaders);
+  for (size_t t = 0; t < kNumReaders; t++) {
+    readers.emplace_back([&, t]() {
+      // wait for start
+      {
+        std::unique_lock<std::mutex> lk(start_mu);
+        while (!start_flag) {
+          start_cv.wait(lk);
+        }
+      }
+      // each reader does a bunch of random reads
+      std::mt19937 rng(static_cast<uint32_t>(0xC0FFEE + t));
+      std::uniform_int_distribution<size_t> dist(0, kNumPages - 1);
+
+      for (size_t it = 0; it < kReaderRounds; it++) {
+        const size_t idx = dist(rng);
+        const page_id_t pid = page_ids[idx];
+
+        // Shared read
+        auto r = bpm->ReadPage(pid, AccessType::Unknown);
+        const char *buf = r.GetData();
+
+        // At minimum, the encoded pid must match (protects against stale mapping / torn I/O).
+        // std::cout<<"till here";
+        ASSERT_TRUE(check_pattern_pid_only(buf, pid)) << "Reader saw wrong pid in page header: expected " << pid;
+
+        r.Drop();
+      }
+    });
+  }
+
+  // Start all threads together (same pattern as your EvictableTest).
+  {
+    std::unique_lock<std::mutex> lk(start_mu);
+    start_flag = true;
+    start_cv.notify_all();
+  }
+
+  for (auto &th : writers) th.join();
+  for (auto &th : readers) th.join();
+
+  // Final spot checks: read a few pages and ensure pid matches.
+  for (size_t i = 0; i < kNumPages; i += 7) {
+    auto g = bpm->ReadPage(page_ids[i], AccessType::Unknown);
+    EXPECT_TRUE(check_pattern_pid_only(g.GetData(), page_ids[i]));
+    g.Drop();
+  }
+  std::cout << "till here";
+  disk_manager->ShutDown();
+  remove(db_fname);
 }
 
 }  // namespace bustub

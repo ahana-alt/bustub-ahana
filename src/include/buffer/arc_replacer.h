@@ -34,6 +34,7 @@ struct FrameStatus {
   frame_id_t frame_id_;
   bool evictable_;
   ArcStatus arc_status_;
+  std::list<frame_id_t>::iterator list_iter_;
   FrameStatus(page_id_t pid, frame_id_t fid, bool ev, ArcStatus st)  // constructor signature
       : page_id_(pid), frame_id_(fid), evictable_(ev), arc_status_(st) {}
 };
@@ -76,6 +77,9 @@ class ArcReplacer {
    * identifier in ghost lists */
   std::unordered_map<page_id_t, std::shared_ptr<FrameStatus>> ghost_map_;
 
+  std::unordered_map<page_id_t, std::list<page_id_t>::iterator> mru_ghost_iters_;
+  std::unordered_map<page_id_t, std::list<page_id_t>::iterator> mfu_ghost_iters_;
+
   /* alive, evictable entries count */
   size_t curr_size_{0};
   /* p as in original paper */
@@ -85,6 +89,7 @@ class ArcReplacer {
   std::mutex latch_;
 
   // TODO(student): You can add member variables / functions as you like.
+  std::list<frame_id_t>::iterator list_iter_;
 };
 
 }  // namespace bustub

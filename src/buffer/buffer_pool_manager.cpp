@@ -11,6 +11,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "buffer/buffer_pool_manager.h"
+#include <cstddef>
+#include <iostream>
+#include <type_traits>
 #include "buffer/arc_replacer.h"
 #include "common/config.h"
 #include "common/macros.h"
@@ -76,6 +79,7 @@ BufferPoolManager::BufferPoolManager(size_t num_frames, DiskManager *disk_manage
       disk_scheduler_(std::make_shared<DiskScheduler>(disk_manager)),
       log_manager_(log_manager) {
   // Not strictly necessary...
+  std::cout << "[BufferPoolManager::Constructor] Acquiring bpm_latch_" << std::endl;
   std::scoped_lock latch(*bpm_latch_);
 
   // Initialize the monotonically increasing counter at 0.
@@ -117,7 +121,10 @@ auto BufferPoolManager::Size() const -> size_t { return num_frames_; }
  *
  * @return The page ID of the newly allocated page.
  */
-auto BufferPoolManager::NewPage() -> page_id_t { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+auto BufferPoolManager::NewPage() -> page_id_t {
+  const page_id_t pid = next_page_id_.fetch_add(1, std::memory_order_relaxed);
+  return pid;
+}
 
 /**
  * @brief Removes a page from the database, both on disk and in memory.
@@ -138,7 +145,39 @@ auto BufferPoolManager::NewPage() -> page_id_t { UNIMPLEMENTED("TODO(P1): Add im
  * @param page_id The page ID of the page we want to delete.
  * @return `false` if the page exists but could not be deleted, `true` if the page didn't exist or deletion succeeded.
  */
-auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
+  std::shared_ptr<FrameHeader> fh;
+  frame_id_t fid;
+
+  std::cout << "[DeletePage] Acquiring bpm_latch_ (unique)" << std::endl;
+  std::unique_lock lk(*bpm_latch_);
+
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {
+    // resident = true;
+    fid = it->second;
+    fh = frames_[fid];
+
+    if (fh->pin_count_.load(std::memory_order_relaxed) > 0) {
+      return false;
+    }
+
+    // Remove mapping & recycle frame
+    page_table_.erase(it);
+    replacer_->RecordAccess(fid, page_id);
+    replacer_->SetEvictable(fid, false);
+    fh->Reset();
+    free_frames_.push_back(fid);
+  }
+  // release bpm_latch_ BEFORE disk I/O
+
+  // std::cout << "[DeletePage] Acquiring frame rwlatch_ (exclusive)" << std::endl;
+  // fh->rwlatch_.lock();
+  std::cout << "[DeletePage] Releasing bpm_latch_" << std::endl;
+  lk.unlock();
+  disk_scheduler_->DeallocatePage(page_id);
+  return true;
+}
 
 /**
  * @brief Acquires an optional write-locked guard over a page of data. The user can specify an `AccessType` if needed.
@@ -179,8 +218,113 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool { UNIMPLEMENTED("T
  * @return std::optional<WritePageGuard> An optional latch guard where if there are no more free frames (out of memory)
  * returns `std::nullopt`; otherwise, returns a `WritePageGuard` ensuring exclusive and mutable access to a page's data.
  */
+// ========================= CheckedWritePage =========================
 auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_type) -> std::optional<WritePageGuard> {
-  UNIMPLEMENTED("TODO(P1): Add implementation.");
+  std::cout << page_id << std::endl;
+  std::cout << "[CheckedWritePage] Acquiring bpm_latch_ (unique)" << std::endl;
+  std::unique_lock<std::mutex> lk(*bpm_latch_);
+
+  // Case 1: Page already exists in buffer pool
+  if (auto it = page_table_.find(page_id); it != page_table_.end()) {
+    std::cout << "case1" << std::endl;
+    const frame_id_t fid = it->second;
+    auto frame = frames_[fid];
+
+    replacer_->RecordAccess(fid, page_id, access_type);
+    replacer_->SetEvictable(fid, false);
+
+    // CRITICAL: Increment pin count WHILE holding bpm_latch_
+    // This ensures atomicity with SetEvictable
+    // frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
+
+    // Release bpm_latch_ BEFORE acquiring frame lock to avoid deadlock
+    lk.unlock();
+    std::cout << "releasing bpm latch" << std::endl;
+
+    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+
+    return guard;
+  }
+
+  // Case 2: Free frame available
+  if (!free_frames_.empty()) {
+    std::cout << "case2" << std::endl;
+    const frame_id_t fid = free_frames_.front();
+    free_frames_.pop_front();
+    auto frame = frames_[fid];
+
+    frame->Reset();
+    page_table_[page_id] = fid;
+
+    replacer_->RecordAccess(fid, page_id, access_type);
+    replacer_->SetEvictable(fid, false);
+
+    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+
+    lk.unlock();
+
+    std::promise<bool> p;
+    auto f = p.get_future();
+    std::vector<DiskRequest> reqs;
+    reqs.emplace_back(DiskRequest{false, frame->GetDataMut(), page_id, std::move(p)});
+    disk_scheduler_->Schedule(reqs);
+    f.get();
+
+    return guard;
+  }
+
+  // Case 3: Need to evict
+  auto victim_opt = replacer_->Evict();
+
+  if (!victim_opt) {
+    std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_ (no victim)" << std::endl;
+    lk.unlock();
+    return std::nullopt;
+  }
+
+  const frame_id_t victim = *victim_opt;
+  auto frame = frames_[victim];
+
+  page_id_t pid = INVALID_PAGE_ID;
+  for (const auto &itr : page_table_) {
+    if (itr.second == victim) {
+      pid = itr.first;
+      break;
+    }
+  }
+
+  bool was_dirty = frame->is_dirty_;
+  page_table_.erase(pid);
+  page_table_[page_id] = victim;
+
+  replacer_->RecordAccess(victim, page_id, access_type);
+  replacer_->SetEvictable(victim, false);
+
+  // Acquire lock, let guard increment pin count
+  WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+
+  std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_" << std::endl;
+  lk.unlock();
+
+  if (was_dirty) {
+    std::promise<bool> flush_p;
+    auto flush_f = flush_p.get_future();
+    std::vector<DiskRequest> flush_reqs;
+    flush_reqs.emplace_back(DiskRequest{true, const_cast<char *>(frame->GetData()), pid, std::move(flush_p)});
+    disk_scheduler_->Schedule(flush_reqs);
+    flush_f.get();
+  }
+
+  frame->is_dirty_ = false;
+
+  std::promise<bool> p;
+  auto f = p.get_future();
+  std::vector<DiskRequest> reqs;
+  reqs.emplace_back(DiskRequest{false, frame->GetDataMut(), page_id, std::move(p)});
+  disk_scheduler_->Schedule(reqs);
+  f.get();
+
+  return guard;
 }
 
 /**
@@ -207,8 +351,114 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
  * @return std::optional<ReadPageGuard> An optional latch guard where if there are no more free frames (out of memory)
  * returns `std::nullopt`; otherwise, returns a `ReadPageGuard` ensuring shared and read-only access to a page's data.
  */
+// ========================= CheckedReadPage =========================
 auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_type) -> std::optional<ReadPageGuard> {
-  UNIMPLEMENTED("TODO(P1): Add implementation.");
+  std::cout << "[CheckedReadPage] Acquiring bpm_latch_ (unique)" << std::endl;
+  std::unique_lock<std::mutex> lk(*bpm_latch_);
+
+  // Case 1: Page already exists in buffer pool
+  if (auto it = page_table_.find(page_id); it != page_table_.end()) {
+    const frame_id_t fid = it->second;
+    auto frame = frames_[fid];
+
+    replacer_->RecordAccess(fid, page_id, access_type);
+    replacer_->SetEvictable(fid, false);
+
+    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+
+    // CRITICAL: Increment pin count WHILE holding bpm_latch_
+    // This ensures atomicity with SetEvictable
+    // frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
+
+    std::cout << "[CheckedReadPage-Case1] Releasing bpm_latch_" << std::endl;
+    lk.unlock();
+
+    // Now acquire lock, skip pin increment (already done above)
+
+    return guard;
+  }
+
+  // Case 2: Free frame available
+  if (!free_frames_.empty()) {
+    const frame_id_t fid = free_frames_.front();
+    free_frames_.pop_front();
+    auto frame = frames_[fid];
+
+    frame->Reset();
+    page_table_[page_id] = fid;
+
+    replacer_->RecordAccess(fid, page_id, access_type);
+    replacer_->SetEvictable(fid, false);
+
+    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+
+    std::cout << "[CheckedReadPage-Case2] Releasing bpm_latch_" << std::endl;
+    lk.unlock();
+
+    // Acquire lock, let guard increment pin count
+
+    std::promise<bool> p;
+    auto f = p.get_future();
+    std::vector<DiskRequest> reqs;
+    reqs.emplace_back(DiskRequest{false, frame->GetDataMut(), page_id, std::move(p)});
+    disk_scheduler_->Schedule(reqs);
+    f.get();
+
+    return guard;
+  }
+
+  // Case 3: Need to evict
+  auto victim_opt = replacer_->Evict();
+
+  if (!victim_opt) {
+    std::cout << "[CheckedReadPage-Case3] Releasing bpm_latch_ (no victim)" << std::endl;
+    lk.unlock();
+    return std::nullopt;
+  }
+
+  const frame_id_t victim = *victim_opt;
+  auto fh = frames_[victim];
+
+  page_id_t old_pid = INVALID_PAGE_ID;
+  for (const auto &kv : page_table_) {
+    if (kv.second == victim) {
+      old_pid = kv.first;
+      break;
+    }
+  }
+
+  bool was_dirty = fh->is_dirty_;
+
+  page_table_.erase(old_pid);
+  page_table_[page_id] = victim;
+
+  replacer_->RecordAccess(victim, page_id, access_type);
+  replacer_->SetEvictable(victim, false);
+
+  ReadPageGuard guard{page_id, fh, replacer_, bpm_latch_, disk_scheduler_};
+
+  std::cout << "[CheckedReadPage-Case3] Releasing bpm_latch_" << std::endl;
+  lk.unlock();
+
+  if (was_dirty) {
+    std::promise<bool> flush_p;
+    auto flush_f = flush_p.get_future();
+    std::vector<DiskRequest> flush_reqs;
+    flush_reqs.emplace_back(DiskRequest{true, const_cast<char *>(fh->GetData()), old_pid, std::move(flush_p)});
+    disk_scheduler_->Schedule(flush_reqs);
+    flush_f.get();
+  }
+
+  fh->is_dirty_ = false;
+
+  std::promise<bool> p;
+  auto f = p.get_future();
+  std::vector<DiskRequest> reqs;
+  reqs.emplace_back(DiskRequest{false, fh->GetDataMut(), page_id, std::move(p)});
+  disk_scheduler_->Schedule(reqs);
+  f.get();
+
+  return guard;
 }
 
 /**
@@ -280,7 +530,29 @@ auto BufferPoolManager::ReadPage(page_id_t page_id, AccessType access_type) -> R
  * @param page_id The page ID of the page to be flushed.
  * @return `false` if the page could not be found in the page table; otherwise, `true`.
  */
-auto BufferPoolManager::FlushPageUnsafe(page_id_t page_id) -> bool { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+auto BufferPoolManager::FlushPageUnsafe(page_id_t page_id) -> bool {
+  std::shared_ptr<FrameHeader> fh;
+  {
+    auto it = page_table_.find(page_id);
+    if (it == page_table_.end()) {
+      return false;
+    }
+    fh = frames_[it->second];
+  }
+
+  if (!fh->is_dirty_) {
+    return true;
+  }
+
+  std::promise<bool> p;
+  auto f = p.get_future();
+  std::vector<DiskRequest> reqs;
+  reqs.emplace_back(DiskRequest{/*is_write=*/true, const_cast<char *>(fh->GetData()), page_id, std::move(p)});
+  disk_scheduler_->Schedule(reqs);
+  f.get();
+
+  return true;
+}
 
 /**
  * @brief Flushes a page's data out to disk safely.
@@ -300,7 +572,36 @@ auto BufferPoolManager::FlushPageUnsafe(page_id_t page_id) -> bool { UNIMPLEMENT
  * @param page_id The page ID of the page to be flushed.
  * @return `false` if the page could not be found in the page table; otherwise, `true`.
  */
-auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
+  std::shared_ptr<FrameHeader> fh;
+
+  {
+    std::cout << "[FlushPage] Acquiring bpm_latch_ (scoped)" << std::endl;
+    std::scoped_lock lk(*bpm_latch_);
+    auto it = page_table_.find(page_id);
+    if (it == page_table_.end()) {
+      return false;
+    }
+    fh = frames_[it->second];
+  }
+
+  if (!fh->is_dirty_) {
+    return true;
+  }
+
+  std::cout << "[FlushPage] Acquiring frame rwlatch_ (exclusive)" << std::endl;
+  std::unique_lock<std::shared_mutex> wl(fh->rwlatch_);
+
+  std::promise<bool> p;
+  auto f = p.get_future();
+  std::vector<DiskRequest> reqs;
+  reqs.emplace_back(DiskRequest{true, const_cast<char *>(fh->GetData()), page_id, std::move(p)});
+  disk_scheduler_->Schedule(reqs);
+  f.get();
+
+  fh->is_dirty_ = false;
+  return true;
+}
 
 /**
  * @brief Flushes all page data that is in memory to disk unsafely.
@@ -315,7 +616,18 @@ auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool { UNIMPLEMENTED("TO
  *
  * TODO(P1): Add implementation
  */
-void BufferPoolManager::FlushAllPagesUnsafe() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+void BufferPoolManager::FlushAllPagesUnsafe() {
+  std::vector<page_id_t> pids;
+  {
+    pids.reserve(page_table_.size());
+    for (const auto &kv : page_table_) {
+      pids.push_back(kv.first);
+    }
+  }
+  for (page_id_t pid : pids) {
+    FlushPageUnsafe(pid);
+  }
+}
 
 /**
  * @brief Flushes all page data that is in memory to disk safely.
@@ -329,7 +641,20 @@ void BufferPoolManager::FlushAllPagesUnsafe() { UNIMPLEMENTED("TODO(P1): Add imp
  *
  * TODO(P1): Add implementation
  */
-void BufferPoolManager::FlushAllPages() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+void BufferPoolManager::FlushAllPages() {
+  std::vector<page_id_t> pids;
+  {
+    std::cout << "[FlushAllPages] Acquiring bpm_latch_ (scoped)" << std::endl;
+    std::scoped_lock lk(*bpm_latch_);
+    pids.reserve(page_table_.size());
+    for (const auto &kv : page_table_) {
+      pids.push_back(kv.first);
+    }
+  }
+  for (page_id_t pid : pids) {
+    FlushPage(pid);
+  }
+}
 
 /**
  * @brief Retrieves the pin count of a page. If the page does not exist in memory, return `std::nullopt`.
@@ -356,7 +681,15 @@ void BufferPoolManager::FlushAllPages() { UNIMPLEMENTED("TODO(P1): Add implement
  * @return std::optional<size_t> The pin count if the page exists; otherwise, `std::nullopt`.
  */
 auto BufferPoolManager::GetPinCount(page_id_t page_id) -> std::optional<size_t> {
-  UNIMPLEMENTED("TODO(P1): Add implementation.");
+  std::cout << "[GetPinCount] Acquiring bpm_latch_ (scoped)" << std::endl;
+  std::scoped_lock lk(*bpm_latch_);
+  auto it = page_table_.find(page_id);
+  if (it == page_table_.end()) {
+    return std::nullopt;  // page not resident
+  }
+  const frame_id_t fid = it->second;
+  const auto &fh = frames_[fid];
+  return fh->pin_count_.load(std::memory_order_relaxed);
 }
 
 }  // namespace bustub

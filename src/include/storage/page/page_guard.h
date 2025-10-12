@@ -96,13 +96,14 @@ class ReadPageGuard {
    * pool's latch for when we need to update the frame's eviction state in the buffer pool replacer.
    */
   std::shared_ptr<std::mutex> bpm_latch_;
-
   /**
    * @brief A shared pointer to the buffer pool's disk scheduler.
    *
    * Used when flushing pages to disk.
    */
   std::shared_ptr<DiskScheduler> disk_scheduler_;
+
+  std::shared_lock<std::shared_mutex> rlatch_;
 
   /**
    * @brief The validity flag for this `ReadPageGuard`.
@@ -211,6 +212,8 @@ class WritePageGuard {
    */
   std::shared_ptr<DiskScheduler> disk_scheduler_;
 
+  std::unique_lock<std::shared_mutex> wlatch_;
+
   /**
    * @brief The validity flag for this `WritePageGuard`.
    *
@@ -229,6 +232,8 @@ class WritePageGuard {
    * If you want extra (nonexistent) style points, and you want to be extra fancy, then you can look into the
    * `std::unique_lock` type and use that for the latching mechanism instead of manually calling `lock` and `unlock`.
    */
+
+  bool dirty_{false};
 };
 
 }  // namespace bustub

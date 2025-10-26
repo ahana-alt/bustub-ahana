@@ -12,7 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "storage/page/page_guard.h"
-#include <future>
+#include <future>  //NOLINT
 #include <iostream>
 #include <memory>
 #include <shared_mutex>

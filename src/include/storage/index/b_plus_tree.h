@@ -75,7 +75,7 @@ class Context {
 FULL_INDEX_TEMPLATE_ARGUMENTS_DEFN
 class BPlusTree {
   using InternalPage = BPlusTreeInternalPage<KeyType, page_id_t, KeyComparator>;
-  using LeafPage = BPlusTreeLeafPage<KeyType, ValueType, KeyComparator>;
+  using LeafPage = BPlusTreeLeafPage<KeyType, ValueType, KeyComparator, NumTombs>;
 
  public:
   explicit BPlusTree(std::string name, page_id_t header_page_id, BufferPoolManager *buffer_pool_manager,
@@ -88,8 +88,53 @@ class BPlusTree {
   // Insert a key-value pair into this B+ tree.
   auto Insert(const KeyType &key, const ValueType &value) -> bool;
 
+  auto InsertPessimistic(const KeyType &key, const ValueType &value) -> bool;
+
+  auto SplitLeaf(LeafPage *old_leaf, WritePageGuard old_leaf_guard, const KeyType &key, const ValueType &value,
+                 Context &ctx) -> bool;
+
+  auto InsertIntoParent(page_id_t left_page_id, const KeyType &key, page_id_t right_page_id, Context &ctx) -> bool;
+
+  auto SplitInternal(InternalPage *old_internal, WritePageGuard old_guard, page_id_t old_internal_id,
+                     page_id_t left_child_id, const KeyType &key, page_id_t right_child_id, Context &ctx) -> bool;
+
   // Remove a key and its value from this B+ tree.
   void Remove(const KeyType &key);
+
+  void PrintTree(std::ostream &out = std::cout);
+  void PrintTreeHelper(page_id_t page_id, int depth, std::ostream &out);
+
+  void CoalesceOrRedistribute(WritePageGuard &node_guard, Context &ctx);
+
+  void Redistribute(WritePageGuard &node_guard,
+                                  WritePageGuard &sibling_guard,
+                                  WritePageGuard &parent_guard,
+                                  int node_index, int sibling_index,
+                                  bool is_predecessor);
+
+  void Coalesce(WritePageGuard &node_guard,
+                               WritePageGuard &sibling_guard,
+                               WritePageGuard &parent_guard,
+                               int node_index, int sibling_index,
+                               bool is_predecessor, Context &ctx);
+
+  void CoalesceOrRedistributeInternal(WritePageGuard &node_guard, Context &ctx);
+
+  void RedistributeInternal(WritePageGuard &node_guard,
+                                          WritePageGuard &sibling_guard,
+                                          WritePageGuard &parent_guard,
+                                          int node_index, int sibling_index,
+                                          bool is_predecessor);
+
+  void CoalesceInternal(WritePageGuard &node_guard,
+                                      WritePageGuard &sibling_guard,
+                                      WritePageGuard &parent_guard,
+                                      int node_index, int sibling_index,
+                                      bool is_predecessor, Context &ctx);
+
+  void HandleLeafUnderflow(LeafPage *leaf, WritePageGuard leaf_guard, Context &ctx);
+
+  void HandleInternalUnderflow(InternalPage *node, WritePageGuard node_guard, Context &ctx);
 
   // Return the value associated with a given key
   auto GetValue(const KeyType &key, std::vector<ValueType> *result) -> bool;

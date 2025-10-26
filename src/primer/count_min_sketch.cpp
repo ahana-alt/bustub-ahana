@@ -15,7 +15,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
-#include <mutex>
+#include <mutex>  //NOLINT
 #include <stdexcept>
 #include <string>
 #include <utility>

@@ -74,6 +74,48 @@ class BPlusTreeLeafPage : public BPlusTreePage {
   void SetNextPageId(page_id_t next_page_id);
   auto KeyAt(int index) const -> KeyType;
 
+  auto ValueAt(int index) const -> ValueType;
+  void SetKeyAt(int index, const KeyType &key);
+  void SetValueAt(int index, const ValueType &value);
+
+  auto HasDuplicates(const KeyType &key, const KeyComparator &comparator) const -> bool;
+
+  // Insert key-value at position, shifting everything right
+  void InsertAt(int index, const KeyType &key, const ValueType &value);
+
+  auto FindKey(const KeyType &key, const KeyComparator &comparator) const -> int;
+
+  // Remove key-value at position, shifting everything left
+  void RemoveAt(int index);
+
+  // Find the index where this key should be inserted (binary search)
+  auto KeyIndex(const KeyType &key, const KeyComparator &comparator) const -> int;
+
+  void InsertAndSplit(const KeyType &key, const ValueType &value, BPlusTreeLeafPage *recipient, KeyType *middle_key,
+                      const KeyComparator &comparator);
+
+  auto GetTombstoneCount() const -> int;
+
+  void SetTombstones(const std::vector<size_t> &tombs);
+
+  auto GetTombstoneAt(size_t index) const -> size_t;
+
+  auto HasTombstones() const -> bool;
+
+  auto AlreadyMarked(const KeyType &key, const KeyComparator &comparator_) const -> bool;
+
+  void ProcessAllTombstones();
+
+  void ProcessTombstone();
+
+  void AddTombstone(int index);
+
+  // Check if page is full
+  auto IsFull() const -> bool { return GetSize() >= GetMaxSize(); }
+
+  // // Move half the entries to a new page (for splitting)
+  // void MoveHalfTo(LeafPage *recipient);
+
   /**
    * @brief for test only return a string representing all keys in
    * this leaf page formatted as "(tombkey1, tombkey2, ...|key1,key2,key3,...)"

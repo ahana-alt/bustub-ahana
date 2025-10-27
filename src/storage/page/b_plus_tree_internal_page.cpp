@@ -132,9 +132,9 @@ void B_PLUS_TREE_INTERNAL_PAGE_TYPE::InsertAndSplit(page_id_t old_child_id, cons
       if (i > 0) {
         all_keys.push_back(KeyAt(i));
       }
-      all_values.push_back(old_child_id);       // Add the value
-      all_keys.push_back(key);                  // Add new key (goes between old and new values)
-      all_values.push_back(new_child_id);       // Add new value
+      all_values.push_back(old_child_id);  // Add the value
+      all_keys.push_back(key);             // Add new key (goes between old and new values)
+      all_values.push_back(new_child_id);  // Add new value
       inserted = true;
     } else {
       // all_values.push_back(ValueAt(i));

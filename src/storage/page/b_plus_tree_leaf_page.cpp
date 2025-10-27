@@ -232,7 +232,7 @@ auto B_PLUS_TREE_LEAF_PAGE_TYPE::HasTombstones() const -> bool { return num_tomb
 
 // add to .h file
 FULL_INDEX_TEMPLATE_ARGUMENTS
-auto B_PLUS_TREE_LEAF_PAGE_TYPE::AlreadyMarked(const KeyType &key, const KeyComparator &comparator_) const -> bool { 
+auto B_PLUS_TREE_LEAF_PAGE_TYPE::AlreadyMarked(const KeyType &key, const KeyComparator &comparator_) const -> bool {
   for (int i = 0; i < GetTombstoneCount(); i++) {
     size_t tomb_idx = GetTombstoneAt(i);
     if (comparator_(KeyAt(tomb_idx), key) == 0) {
@@ -285,7 +285,7 @@ void B_PLUS_TREE_LEAF_PAGE_TYPE::AddTombstone(int index) {
   BUSTUB_ASSERT(num_tombstones_ < LEAF_PAGE_TOMB_CNT, "Tombstone buffer full");
   tombstones_[num_tombstones_] = index;
   num_tombstones_++;
-  std::cout<<"[LEAF PAGE] added tombstone "<<num_tombstones_;
+  std::cout << "[LEAF PAGE] added tombstone " << num_tombstones_;
 }
 
 template class BPlusTreeLeafPage<GenericKey<4>, RID, GenericComparator<4>>;

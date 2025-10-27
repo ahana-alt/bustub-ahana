@@ -380,6 +380,7 @@ void BPLUSTREE_TYPE::Remove(const KeyType &key) {
   Context ctx;
   ctx.header_page_ = bpm_->WritePage(header_page_id_);
   auto *header = ctx.header_page_->template AsMut<BPlusTreeHeaderPage>();
+  ctx.root_page_id_ = header->root_page_id_;
 
   if (header->root_page_id_ == INVALID_PAGE_ID) {
     ctx.header_page_ = std::nullopt;
@@ -389,33 +390,34 @@ void BPLUSTREE_TYPE::Remove(const KeyType &key) {
   // Navigate to leaf
   page_id_t root_id = header->root_page_id_;
   WritePageGuard leaf_guard = bpm_->WritePage(root_id);
-  ctx.write_set_.push_back(std::move(ctx.header_page_.value()));
-  
+  // ctx.write_set_.push_back(std::move(ctx.header_page_.value()));
+
   while (!leaf_guard.As<BPlusTreePage>()->IsLeafPage()) {
     auto internal = leaf_guard.As<InternalPage>();
-  
-    std::cout << "[Remove-Nav] At internal page " << leaf_guard.GetPageId() 
-              << " size=" << internal->GetSize() << std::endl;
+
+    std::cout << "[Remove-Nav] At internal page " << leaf_guard.GetPageId() << " size=" << internal->GetSize()
+              << std::endl;
     std::cout << "[Remove-Nav] Looking for key=" << key << std::endl;
-  
+
     page_id_t child_page_id = internal->ValueAt(0);
     std::cout << "[Remove-Nav] Starting with ValueAt(0)=" << child_page_id << std::endl;
-  
+
     for (int i = 1; i < internal->GetSize(); i++) {
       std::cout << "[Remove-Nav] i=" << i << " KeyAt(" << i << ")=" << internal->KeyAt(i) << std::endl;
-      std::cout << "[Remove-Nav] Comparing: key(" << key << ") <= KeyAt(" << i << ")->(" << internal->KeyAt(i) << ")" << std::endl;
-    
+      std::cout << "[Remove-Nav] Comparing: key(" << key << ") <= KeyAt(" << i << ")->(" << internal->KeyAt(i) << ")"
+                << std::endl;
+
       if (comparator_(key, internal->KeyAt(i)) < 0) {
         std::cout << "[Remove-Nav] TRUE - breaking, staying with child_page_id=" << child_page_id << std::endl;
         break;
       }
-    
+
       child_page_id = internal->ValueAt(i);
       std::cout << "[Remove-Nav] FALSE - moving to ValueAt(" << i << ")=" << child_page_id << std::endl;
     }
-  
+
     std::cout << "[Remove-Nav] Final child_page_id=" << child_page_id << std::endl;
-  
+
     ctx.write_set_.push_back(std::move(leaf_guard));
     leaf_guard = bpm_->WritePage(child_page_id);
   }
@@ -427,9 +429,8 @@ void BPLUSTREE_TYPE::Remove(const KeyType &key) {
   // Find key
   int key_index = leaf->FindKey(key, comparator_);
   std::cout << "[Remove] FindKey returned key_index=" << key_index << std::endl;
-  std::cout << "[Remove] Leaf page_id=" << leaf_guard.GetPageId() 
-          << ", size=" << leaf->GetSize() << std::endl;
-  
+  std::cout << "[Remove] Leaf page_id=" << leaf_guard.GetPageId() << ", size=" << leaf->GetSize() << std::endl;
+
   std::cout << "[Remove] Leaf keys: ";
   for (int i = 0; i < leaf->GetSize(); i++) {
     std::cout << leaf->KeyAt(i) << " ";
@@ -446,10 +447,9 @@ void BPLUSTREE_TYPE::Remove(const KeyType &key) {
     return;
   }
 
-  std::cout << "[Remove] Found key at index=" << key_index 
-            << ", max_tombs=" << NumTombs << std::endl;
+  std::cout << "[Remove] Found key at index=" << key_index << ", max_tombs=" << NumTombs << std::endl;
 
-  // THIS IS THE CRITICAL PART 
+  // THIS IS THE CRITICAL PART
   if constexpr (NumTombs == 0) {
     // No tombstone buffer - immediately physically delete
     std::cout << "[Remove] No tombstone buffer, physically removing entry" << std::endl;
@@ -472,32 +472,24 @@ void BPLUSTREE_TYPE::Remove(const KeyType &key) {
     leaf->AddTombstone(key_index);
   }
 
-  std::cout << "[Remove] After removal - size=" << leaf->GetSize()
-            << ", tombstones=" << leaf->GetTombstoneCount() << std::endl;
+  std::cout << "[Remove] After removal - size=" << leaf->GetSize() << ", tombstones=" << leaf->GetTombstoneCount()
+            << std::endl;
 
   // Calculate effective size
   int effective_size = leaf->GetSize() - leaf->GetTombstoneCount();
-  bool is_root = ctx.write_set_.size() == 1;
+  bool is_root = (leaf_guard.GetPageId() == ctx.root_page_id_);
 
-  std::cout << "[Remove] effective_size=" << effective_size 
-            << ", is_root=" << is_root << std::endl;
+  std::cout << "[Remove] effective_size=" << effective_size << ", is_root=" << is_root << std::endl;
 
   // Check if root is now effectively empty
   if (is_root && effective_size == 0) {
     std::cout << "[Remove] Root is empty, setting to INVALID_PAGE_ID" << std::endl;
-  
+
     // Get header from write_set (it was moved there earlier)
-    auto header_guard = std::move(ctx.write_set_[0]);
-    auto *writable_header = header_guard.template AsMut<BPlusTreeHeaderPage>();
-    writable_header->root_page_id_ = INVALID_PAGE_ID;
-  
-    page_id_t leaf_id = leaf_guard.GetPageId();
-  
-    // Drop guards before deleting page
-    leaf_guard.Drop();
-    header_guard.Drop();
-  
-    bpm_->DeletePage(leaf_id);
+    auto *header = ctx.header_page_->template AsMut<BPlusTreeHeaderPage>();
+    header->root_page_id_ = INVALID_PAGE_ID;
+
+    bpm_->DeletePage(leaf_guard.GetPageId());
     return;
   }
 
@@ -513,22 +505,21 @@ void BPLUSTREE_TYPE::Remove(const KeyType &key) {
 FULL_INDEX_TEMPLATE_ARGUMENTS
 void BPLUSTREE_TYPE::CoalesceOrRedistribute(WritePageGuard &node_guard, Context &ctx) {
   auto *node = node_guard.template AsMut<LeafPage>();
-  std::cout << "[CoalesceOrRedistribute] node_page=" << node_guard.GetPageId() 
-            << " size=" << node->GetSize() 
+  std::cout << "[CoalesceOrRedistribute] node_page=" << node_guard.GetPageId() << " size=" << node->GetSize()
             << " tombstones=" << node->GetTombstoneCount() << std::endl;
-  
+
   // Get parent from write set
   if (ctx.write_set_.empty()) {
     std::cout << "[CoalesceOrRedistribute] No parent (root node), returning" << std::endl;
     return;  // Root node, nothing to do
   }
-  
+
   auto parent_guard = std::move(ctx.write_set_.back());
   ctx.write_set_.pop_back();
   auto *parent = parent_guard.template AsMut<InternalPage>();
-  std::cout << "[CoalesceOrRedistribute] parent_page=" << parent_guard.GetPageId() 
+  std::cout << "[CoalesceOrRedistribute] parent_page=" << parent_guard.GetPageId()
             << " parent_size=" << parent->GetSize() << std::endl;
-  
+
   // Find node's index in parent
   int node_index = -1;
   for (int i = 0; i < parent->GetSize(); i++) {
@@ -539,12 +530,12 @@ void BPLUSTREE_TYPE::CoalesceOrRedistribute(WritePageGuard &node_guard, Context 
   }
   BUSTUB_ASSERT(node_index != -1, "Node not found in parent");
   std::cout << "[CoalesceOrRedistribute] node_index_in_parent=" << node_index << std::endl;
-  
+
   // Determine sibling (prefer left sibling)
   WritePageGuard sibling_guard;
   int sibling_index;
   bool is_predecessor;
-  
+
   if (node_index > 0) {
     // Use left sibling
     sibling_index = node_index - 1;
@@ -556,66 +547,60 @@ void BPLUSTREE_TYPE::CoalesceOrRedistribute(WritePageGuard &node_guard, Context 
     is_predecessor = false;
     std::cout << "[CoalesceOrRedistribute] Using RIGHT sibling, sibling_index=" << sibling_index << std::endl;
   }
-  
+
   sibling_guard = bpm_->WritePage(parent->ValueAt(sibling_index));
   auto *sibling = sibling_guard.template AsMut<LeafPage>();
-  std::cout << "[CoalesceOrRedistribute] sibling_page=" << sibling_guard.GetPageId() 
-            << " sibling_size=" << sibling->GetSize() 
-            << " sibling_tombstones=" << sibling->GetTombstoneCount() << std::endl;
-  
+  std::cout << "[CoalesceOrRedistribute] sibling_page=" << sibling_guard.GetPageId()
+            << " sibling_size=" << sibling->GetSize() << " sibling_tombstones=" << sibling->GetTombstoneCount()
+            << std::endl;
+
   // Decide: redistribute or coalesce?
   // Use ACTUAL sizes (tombstones still occupy physical space)
   int total_size = node->GetSize() + sibling->GetSize();
   int min_size = node->GetMinSize();
-  
-  std::cout << "[CoalesceOrRedistribute] total_size=" << total_size 
-            << " min_size=" << min_size 
+
+  std::cout << "[CoalesceOrRedistribute] total_size=" << total_size << " min_size=" << min_size
             << " threshold(2*min_size)=" << (2 * min_size) << std::endl;
-  
+
   if (total_size > 2 * min_size) {
     // Enough entries to keep both nodes alive
     std::cout << "[CoalesceOrRedistribute] REDISTRIBUTING (enough entries)" << std::endl;
-    Redistribute(node_guard, sibling_guard, parent_guard,
-                 node_index, sibling_index, is_predecessor);
+    Redistribute(node_guard, sibling_guard, parent_guard, node_index, sibling_index, is_predecessor);
     ctx.write_set_.push_back(std::move(parent_guard));
   } else {
     // Not enough - must merge
     std::cout << "[CoalesceOrRedistribute] COALESCING (not enough entries)" << std::endl;
-    Coalesce(node_guard, sibling_guard, parent_guard,
-             node_index, sibling_index, is_predecessor, ctx);
+    Coalesce(node_guard, sibling_guard, parent_guard, node_index, sibling_index, is_predecessor, ctx);
   }
   std::cout << "[CoalesceOrRedistribute] COMPLETE" << std::endl;
 }
 
 FULL_INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::Redistribute(WritePageGuard &node_guard,
-                                  WritePageGuard &sibling_guard,
-                                  WritePageGuard &parent_guard,
-                                  int node_index, int sibling_index,
+void BPLUSTREE_TYPE::Redistribute(WritePageGuard &node_guard, WritePageGuard &sibling_guard,
+                                  WritePageGuard &parent_guard, int node_index, int sibling_index,
                                   bool is_predecessor) {
   auto *node = node_guard.template AsMut<LeafPage>();
   auto *sibling = sibling_guard.template AsMut<LeafPage>();
   auto *parent = parent_guard.template AsMut<InternalPage>();
-  
-  std::cout << "[Redistribute] START: node_size=" << node->GetSize() 
-            << " sibling_size=" << sibling->GetSize() 
+
+  std::cout << "[Redistribute] START: node_size=" << node->GetSize() << " sibling_size=" << sibling->GetSize()
             << " is_predecessor=" << is_predecessor << std::endl;
-  
+
   int total_size = node->GetSize() + sibling->GetSize();
   int target_size = total_size / 2;
-  
+
   std::cout << "[Redistribute] target_size=" << target_size << std::endl;
-  
+
   if (is_predecessor) {
     // ===== Move entries from LEFT sibling to RIGHT node =====
     // Sibling is donor, node is recipient
     std::cout << "[Redistribute] Moving from LEFT sibling to RIGHT node" << std::endl;
-    
+
     int to_move = sibling->GetSize() - target_size;
     int move_start_idx = sibling->GetSize() - to_move;
-    
+
     std::cout << "[Redistribute] to_move=" << to_move << " move_start_idx=" << move_start_idx << std::endl;
-    
+
     // Step 1: Identify tombstones in sibling that will be transferred
     std::vector<size_t> transferred_tombs;
     for (int i = 0; i < sibling->GetTombstoneCount(); i++) {
@@ -628,39 +613,40 @@ void BPLUSTREE_TYPE::Redistribute(WritePageGuard &node_guard,
       }
     }
     std::cout << "[Redistribute] transferred_tombs count=" << transferred_tombs.size() << std::endl;
-    
+
     // Step 2: Shift existing entries in node to make room
     for (int i = node->GetSize() - 1; i >= 0; i--) {
       node->SetKeyAt(i + to_move, node->KeyAt(i));
       node->SetValueAt(i + to_move, node->ValueAt(i));
     }
-    
+
     // Step 3: Adjust existing node tombstones (they shifted right)
     std::vector<size_t> node_tombs;
+    node_tombs.reserve(node->GetTombstoneCount());
     for (int i = 0; i < node->GetTombstoneCount(); i++) {
       node_tombs.push_back(node->GetTombstoneAt(i) + to_move);
     }
-    
+
     // Step 4: Copy entries from sibling to node
     for (int i = 0; i < to_move; i++) {
       int src_idx = move_start_idx + i;
       node->SetKeyAt(i, sibling->KeyAt(src_idx));
       node->SetValueAt(i, sibling->ValueAt(src_idx));
     }
-    
+
     // Step 5: Update sizes
     node->SetSize(node->GetSize() + to_move);
     sibling->SetSize(sibling->GetSize() - to_move);
-    
+
     // Step 6: Combine tombstones (RECIPIENT FIRST = higher priority)
     std::vector<size_t> combined_tombs = node_tombs;  // Recipient's
-    for (size_t tomb : transferred_tombs) {            // Donor's
+    for (size_t tomb : transferred_tombs) {           // Donor's
       if (combined_tombs.size() < static_cast<size_t>(LEAF_PAGE_TOMB_CNT)) {
         combined_tombs.push_back(tomb);
       }
     }
     node->SetTombstones(combined_tombs);
-    
+
     // Step 7: Update sibling's remaining tombstones
     std::vector<size_t> remaining_tombs;
     for (int i = 0; i < sibling->GetTombstoneCount(); i++) {
@@ -670,21 +656,21 @@ void BPLUSTREE_TYPE::Redistribute(WritePageGuard &node_guard,
       }
     }
     sibling->SetTombstones(remaining_tombs);
-    
+
     // Step 8: Update parent separator key
     parent->SetKeyAt(node_index, node->KeyAt(0));
     std::cout << "[Redistribute] Updated parent separator key at index " << node_index << std::endl;
-    
+
   } else {
     // ===== Move entries from RIGHT sibling to LEFT node =====
     // Sibling is donor, node is recipient
     std::cout << "[Redistribute] Moving from RIGHT sibling to LEFT node" << std::endl;
-    
+
     int to_move = sibling->GetSize() - target_size;
     int old_node_size = node->GetSize();
-    
+
     std::cout << "[Redistribute] to_move=" << to_move << " old_node_size=" << old_node_size << std::endl;
-    
+
     // Step 1: Identify tombstones in sibling that will be transferred
     std::vector<size_t> transferred_tombs;
     for (int i = 0; i < sibling->GetTombstoneCount(); i++) {
@@ -697,33 +683,34 @@ void BPLUSTREE_TYPE::Redistribute(WritePageGuard &node_guard,
       }
     }
     std::cout << "[Redistribute] transferred_tombs count=" << transferred_tombs.size() << std::endl;
-    
+
     // Step 2: Copy entries from sibling to end of node
     for (int i = 0; i < to_move; i++) {
       node->SetKeyAt(old_node_size + i, sibling->KeyAt(i));
       node->SetValueAt(old_node_size + i, sibling->ValueAt(i));
     }
     node->SetSize(node->GetSize() + to_move);
-    
+
     // Step 3: Shift remaining entries in sibling left
     for (int i = 0; i < sibling->GetSize() - to_move; i++) {
       sibling->SetKeyAt(i, sibling->KeyAt(i + to_move));
       sibling->SetValueAt(i, sibling->ValueAt(i + to_move));
     }
     sibling->SetSize(sibling->GetSize() - to_move);
-    
+
     // Step 4: Combine tombstones (RECIPIENT FIRST = higher priority)
     std::vector<size_t> combined_tombs;
+    combined_tombs.reserve(node->GetTombstoneCount());
     for (int i = 0; i < node->GetTombstoneCount(); i++) {  // Recipient's
       combined_tombs.push_back(node->GetTombstoneAt(i));
     }
-    for (size_t tomb : transferred_tombs) {                 // Donor's
+    for (size_t tomb : transferred_tombs) {  // Donor's
       if (combined_tombs.size() < static_cast<size_t>(LEAF_PAGE_TOMB_CNT)) {
         combined_tombs.push_back(tomb);
       }
     }
     node->SetTombstones(combined_tombs);
-    
+
     // Step 5: Update sibling's remaining tombstones (adjust indices)
     std::vector<size_t> remaining_tombs;
     for (int i = 0; i < sibling->GetTombstoneCount(); i++) {
@@ -733,45 +720,40 @@ void BPLUSTREE_TYPE::Redistribute(WritePageGuard &node_guard,
       }
     }
     sibling->SetTombstones(remaining_tombs);
-    
+
     // Step 6: Update parent separator key
     parent->SetKeyAt(sibling_index, sibling->KeyAt(0));
     std::cout << "[Redistribute] Updated parent separator key at index " << sibling_index << std::endl;
   }
-  
-  std::cout << "[Redistribute] COMPLETE: node_size=" << node->GetSize() 
-            << " sibling_size=" << sibling->GetSize() << std::endl;
+
+  std::cout << "[Redistribute] COMPLETE: node_size=" << node->GetSize() << " sibling_size=" << sibling->GetSize()
+            << std::endl;
 }
 
 FULL_INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::Coalesce(WritePageGuard &node_guard,
-                               WritePageGuard &sibling_guard,
-                               WritePageGuard &parent_guard,
-                               int node_index, int sibling_index,
-                               bool is_predecessor, Context &ctx) {
+void BPLUSTREE_TYPE::Coalesce(WritePageGuard &node_guard, WritePageGuard &sibling_guard, WritePageGuard &parent_guard,
+                              int node_index, int sibling_index, bool is_predecessor, Context &ctx) {
   auto *node = node_guard.template AsMut<LeafPage>();
   auto *sibling = sibling_guard.template AsMut<LeafPage>();
   auto *parent = parent_guard.template AsMut<InternalPage>();
-  
-  std::cout << "[Coalesce] START: node_page=" << node_guard.GetPageId() 
-            << " node_size=" << node->GetSize() 
-            << " sibling_page=" << sibling_guard.GetPageId() 
-            << " sibling_size=" << sibling->GetSize() 
+
+  std::cout << "[Coalesce] START: node_page=" << node_guard.GetPageId() << " node_size=" << node->GetSize()
+            << " sibling_page=" << sibling_guard.GetPageId() << " sibling_size=" << sibling->GetSize()
             << " is_predecessor=" << is_predecessor << std::endl;
-  
+
   // Determine recipient (left) and donor (right)
   LeafPage *recipient;
   LeafPage *donor;
   page_id_t page_to_delete;
   int parent_key_to_remove;
-  
+
   if (is_predecessor) {
     recipient = sibling;
     donor = node;
     page_to_delete = node_guard.GetPageId();
     parent_key_to_remove = node_index;
     std::cout << "[Coalesce] Merging node INTO sibling (sibling=left, node=right)" << std::endl;
-    std::cout << "[Coalesce] page_to_delete=" << page_to_delete 
+    std::cout << "[Coalesce] page_to_delete=" << page_to_delete
               << " parent_key_to_remove_index=" << parent_key_to_remove << std::endl;
   } else {
     recipient = node;
@@ -779,29 +761,30 @@ void BPLUSTREE_TYPE::Coalesce(WritePageGuard &node_guard,
     page_to_delete = sibling_guard.GetPageId();
     parent_key_to_remove = sibling_index;
     std::cout << "[Coalesce] Merging sibling INTO node (node=left, sibling=right)" << std::endl;
-    std::cout << "[Coalesce] page_to_delete=" << page_to_delete 
+    std::cout << "[Coalesce] page_to_delete=" << page_to_delete
               << " parent_key_to_remove_index=" << parent_key_to_remove << std::endl;
   }
-  
+
   int recipient_old_size = recipient->GetSize();
-  std::cout << "[Coalesce] recipient_old_size=" << recipient_old_size 
-            << " donor_size=" << donor->GetSize() << std::endl;
-  
+  std::cout << "[Coalesce] recipient_old_size=" << recipient_old_size << " donor_size=" << donor->GetSize()
+            << std::endl;
+
   // Copy all entries from donor to recipient
   for (int i = 0; i < donor->GetSize(); i++) {
     recipient->SetKeyAt(recipient_old_size + i, donor->KeyAt(i));
     recipient->SetValueAt(recipient_old_size + i, donor->ValueAt(i));
   }
   recipient->SetSize(recipient_old_size + donor->GetSize());
-  
+
   std::cout << "[Coalesce] After copy, recipient_size=" << recipient->GetSize() << std::endl;
-  
+
   // Combine tombstones - prioritize recipient's existing tombstones
   std::vector<size_t> combined_tombs;
+  combined_tombs.reserve(node->GetTombstoneCount());
   for (int i = 0; i < recipient->GetTombstoneCount(); i++) {
     combined_tombs.push_back(recipient->GetTombstoneAt(i));
   }
-  
+
   for (int i = 0; i < donor->GetTombstoneCount(); i++) {
     if (combined_tombs.size() < static_cast<size_t>(LEAF_PAGE_TOMB_CNT)) {
       size_t donor_tomb_idx = donor->GetTombstoneAt(i);
@@ -809,29 +792,28 @@ void BPLUSTREE_TYPE::Coalesce(WritePageGuard &node_guard,
     }
   }
   recipient->SetTombstones(combined_tombs);
-  
+
   std::cout << "[Coalesce] Combined tombstones count=" << combined_tombs.size() << std::endl;
-  
+
   // Update linked list
   recipient->SetNextPageId(donor->GetNextPageId());
-  
+
   // Remove entry from parent
   std::cout << "[Coalesce] Removing entry from parent at index " << parent_key_to_remove << std::endl;
   parent->RemoveAt(parent_key_to_remove);
   std::cout << "[Coalesce] Parent size after removal=" << parent->GetSize() << std::endl;
-  
+
   // Delete the merged page
   std::cout << "[Coalesce] Deleting page " << page_to_delete << std::endl;
   bpm_->DeletePage(page_to_delete);
 
   // std::cout << "=== Tree Structure after coalesce===" << std::endl;
   // std::cout << DrawBPlusTree() << std::endl;
-  
+
   // CRITICAL: Check if parent is now empty or needs rebalancing
   bool parent_is_root = ctx.IsRootPage(parent_guard.GetPageId());
-  std::cout << "[Coalesce] parent_is_root=" << parent_is_root 
-            << " parent_size=" << parent->GetSize() << std::endl;
-  
+  std::cout << "[Coalesce] parent_is_root=" << parent_is_root << " parent_size=" << parent->GetSize() << std::endl;
+
   if (parent_is_root && parent->GetSize() == 1) {
     // Parent was root and now has only one child
     std::cout << "[Coalesce] Parent is root with only 1 child, promoting child to root" << std::endl;
@@ -860,7 +842,7 @@ void BPLUSTREE_TYPE::Coalesce(WritePageGuard &node_guard,
   for (int i = 0; i < parent->GetSize(); i++) {
     std::cout << "[Coalesce]   Parent[" << i << "] = page_id " << parent->ValueAt(i);
     if (i > 0) {
-        std::cout << ", key=" << parent->KeyAt(i).ToString();
+      std::cout << ", key=" << parent->KeyAt(i).ToString();
     }
     std::cout << std::endl;
   }
@@ -872,19 +854,19 @@ void BPLUSTREE_TYPE::CoalesceOrRedistributeInternal(WritePageGuard &node_guard, 
   std::cout << "[CoalesceOrRedistributeInternal] node_page=" << node_guard.GetPageId() << std::endl;
   auto *node = node_guard.template AsMut<InternalPage>();
   std::cout << "[CoalesceOrRedistributeInternal] node_size=" << node->GetSize() << std::endl;
-  
+
   // Get parent from write set
   if (ctx.write_set_.empty()) {
     std::cout << "[CoalesceOrRedistributeInternal] No parent (root node), returning" << std::endl;
     return;  // Root node
   }
-  
+
   auto parent_guard = std::move(ctx.write_set_.back());
   ctx.write_set_.pop_back();
   auto *parent = parent_guard.template AsMut<InternalPage>();
-  std::cout << "[CoalesceOrRedistributeInternal] parent_page=" << parent_guard.GetPageId() 
+  std::cout << "[CoalesceOrRedistributeInternal] parent_page=" << parent_guard.GetPageId()
             << " parent_size=" << parent->GetSize() << std::endl;
-  
+
   // Find node's index in parent
   int node_index = -1;
   for (int i = 0; i < parent->GetSize(); i++) {
@@ -895,12 +877,12 @@ void BPLUSTREE_TYPE::CoalesceOrRedistributeInternal(WritePageGuard &node_guard, 
   }
   BUSTUB_ASSERT(node_index != -1, "Node not found in parent");
   std::cout << "[CoalesceOrRedistributeInternal] node_index_in_parent=" << node_index << std::endl;
-  
+
   // Get sibling
   WritePageGuard sibling_guard;
   int sibling_index;
   bool is_predecessor;
-  
+
   if (node_index > 0) {
     sibling_index = node_index - 1;
     is_predecessor = true;
@@ -910,61 +892,71 @@ void BPLUSTREE_TYPE::CoalesceOrRedistributeInternal(WritePageGuard &node_guard, 
     is_predecessor = false;
     std::cout << "[CoalesceOrRedistributeInternal] Using RIGHT sibling, sibling_index=" << sibling_index << std::endl;
   }
-  
+
   sibling_guard = bpm_->WritePage(parent->ValueAt(sibling_index));
   auto *sibling = sibling_guard.template AsMut<InternalPage>();
-  std::cout << "[CoalesceOrRedistributeInternal] sibling_page=" << sibling_guard.GetPageId() 
+  std::cout << "[CoalesceOrRedistributeInternal] sibling_page=" << sibling_guard.GetPageId()
             << " sibling_size=" << sibling->GetSize() << std::endl;
-  
+
   // Decide: redistribute or coalesce
   int total_size = node->GetSize() + sibling->GetSize();
   int min_size = node->GetMinSize();
-  
-  std::cout << "[CoalesceOrRedistributeInternal] total_size=" << total_size 
-            << " min_size=" << min_size 
+
+  std::cout << "[CoalesceOrRedistributeInternal] total_size=" << total_size << " min_size=" << min_size
             << " threshold(2*min_size)=" << (2 * min_size) << std::endl;
-  
+
   if (total_size > 2 * min_size) {
     // Redistribute (implementation similar to leaf case)
     std::cout << "[CoalesceOrRedistributeInternal] REDISTRIBUTING" << std::endl;
-    RedistributeInternal(node_guard, sibling_guard, parent_guard,
-                         node_index, sibling_index, is_predecessor);
+    RedistributeInternal(node_guard, sibling_guard, parent_guard, node_index, sibling_index, is_predecessor);
+
+    if (sibling->GetSize() <= sibling->GetMinSize()) {
+      std::cout << "[CoalesceOrRedistributeInternal] Sibling underfull after redistribution, COALESCING now"
+                << std::endl;
+      // Merge node and sibling together
+      if (is_predecessor) {
+        // sibling is left, node is right - merge node into sibling
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        CoalesceInternal(node_guard, sibling_guard, parent_guard, node_index, sibling_index, is_predecessor, ctx);
+      } else {
+        // sibling is right, node is left - merge sibling into node
+        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        CoalesceInternal(sibling_guard, node_guard, parent_guard, sibling_index, node_index, !is_predecessor, ctx);
+      }
+      return;  // CoalesceInternal handles parent
+    }
     ctx.write_set_.push_back(std::move(parent_guard));
   } else {
     // Coalesce (implementation similar to leaf case)
     std::cout << "[CoalesceOrRedistributeInternal] COALESCING" << std::endl;
-    CoalesceInternal(node_guard, sibling_guard, parent_guard,
-                     node_index, sibling_index, is_predecessor, ctx);
+    CoalesceInternal(node_guard, sibling_guard, parent_guard, node_index, sibling_index, is_predecessor, ctx);
   }
   std::cout << "[CoalesceOrRedistributeInternal] COMPLETE" << std::endl;
 }
 
 FULL_INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::RedistributeInternal(WritePageGuard &node_guard,
-                                          WritePageGuard &sibling_guard,
-                                          WritePageGuard &parent_guard,
-                                          int node_index, int sibling_index,
+void BPLUSTREE_TYPE::RedistributeInternal(WritePageGuard &node_guard, WritePageGuard &sibling_guard,
+                                          WritePageGuard &parent_guard, int node_index, int sibling_index,
                                           bool is_predecessor) {
   auto *node = node_guard.AsMut<InternalPage>();
   auto *sibling = sibling_guard.AsMut<InternalPage>();
   auto *parent = parent_guard.AsMut<InternalPage>();
-  
-  std::cout << "[RedistributeInternal] START: node_size=" << node->GetSize() 
-            << " sibling_size=" << sibling->GetSize() 
+
+  std::cout << "[RedistributeInternal] START: node_size=" << node->GetSize() << " sibling_size=" << sibling->GetSize()
             << " is_predecessor=" << is_predecessor << std::endl;
-  
+
   if (is_predecessor) {
     // ===== Move entries from LEFT sibling to RIGHT node =====
     // Need to pull down parent key and push up new separator
     std::cout << "[RedistributeInternal] Moving from LEFT sibling to RIGHT node" << std::endl;
-    
+
     // Step 1: Get the separator key from parent
     KeyType separator_key = parent->KeyAt(node_index);
-    
+
     // Step 2: Get the last child pointer from sibling
     page_id_t moved_child = sibling->ValueAt(sibling->GetSize() - 1);
     std::cout << "[RedistributeInternal] moved_child=" << moved_child << std::endl;
-    
+
     // Step 3: Shift entries in node to make room
     // for (int i = node->GetSize() - 1; i >= 0; i--) {
     //   node->SetKeyAt(i + 1, node->KeyAt(i));
@@ -981,35 +973,35 @@ void BPLUSTREE_TYPE::RedistributeInternal(WritePageGuard &node_guard,
     // Step 4: Insert separator key and moved child at beginning of node
     // The first value slot already has the leftmost child, so we set the key
     node->SetValueAt(0, moved_child);
-    node->SetKeyAt(0, separator_key);  
+    node->SetKeyAt(0, separator_key);
     node->SetSize(node->GetSize() + 1);
-    
+
     // Step 5: Remove last entry from sibling
     sibling->SetSize(sibling->GetSize() - 1);
-    
+
     // Step 6: Push up new separator key to parent
     // The new separator is the last key in sibling (before removal)
     KeyType new_separator = sibling->KeyAt(sibling->GetSize());
     parent->SetKeyAt(node_index, new_separator);
     std::cout << "[RedistributeInternal] Updated parent separator at index " << node_index << std::endl;
-    
+
   } else {
     // ===== Move entries from RIGHT sibling to LEFT node =====
     // Need to pull down parent key and push up new separator
     std::cout << "[RedistributeInternal] Moving from RIGHT sibling to LEFT node" << std::endl;
-    
+
     // Step 1: Get the separator key from parent
     KeyType separator_key = parent->KeyAt(sibling_index);
-    
+
     // Step 2: Get the first child pointer from sibling
     page_id_t moved_child = sibling->ValueAt(0);
     std::cout << "[RedistributeInternal] moved_child=" << moved_child << std::endl;
-    
+
     // Step 3: Append separator key and moved child to end of node
     node->SetKeyAt(node->GetSize(), separator_key);
     node->SetValueAt(node->GetSize(), moved_child);
     node->SetSize(node->GetSize() + 1);
-    
+
     // Step 4: Push up new separator key to parent
     // The new separator is the first key in sibling (before removal)
     std::cout << "[RedistributeInternal] sibling size before shift: " << sibling->GetSize() << std::endl;
@@ -1018,46 +1010,42 @@ void BPLUSTREE_TYPE::RedistributeInternal(WritePageGuard &node_guard,
     parent->SetKeyAt(sibling_index, new_separator);
     std::cout << "[RedistributeInternal] new_separator=" << new_separator << std::endl;
     std::cout << "[RedistributeInternal] Updated parent separator at index " << sibling_index << std::endl;
-    
+
     // Step 5: Shift entries in sibling left (remove first entry)
     for (int i = 0; i < sibling->GetSize() - 1; i++) {
-        sibling->SetValueAt(i, sibling->ValueAt(i + 1));
+      sibling->SetValueAt(i, sibling->ValueAt(i + 1));
     }
     // Shift keys (keys start at index 1)
     for (int i = 1; i < sibling->GetSize() - 1; i++) {
-        sibling->SetKeyAt(i, sibling->KeyAt(i + 1));
+      sibling->SetKeyAt(i, sibling->KeyAt(i + 1));
     }
     sibling->SetSize(sibling->GetSize() - 1);
   }
-  
-  std::cout << "[RedistributeInternal] COMPLETE: node_size=" << node->GetSize() 
+
+  std::cout << "[RedistributeInternal] COMPLETE: node_size=" << node->GetSize()
             << " sibling_size=" << sibling->GetSize() << std::endl;
 }
 
 // ==================== COALESCE INTERNAL ====================
 FULL_INDEX_TEMPLATE_ARGUMENTS
-void BPLUSTREE_TYPE::CoalesceInternal(WritePageGuard &node_guard,
-                                      WritePageGuard &sibling_guard,
-                                      WritePageGuard &parent_guard,
-                                      int node_index, int sibling_index,
+void BPLUSTREE_TYPE::CoalesceInternal(WritePageGuard &node_guard, WritePageGuard &sibling_guard,
+                                      WritePageGuard &parent_guard, int node_index, int sibling_index,
                                       bool is_predecessor, Context &ctx) {
   auto *node = node_guard.AsMut<InternalPage>();
   auto *sibling = sibling_guard.AsMut<InternalPage>();
   auto *parent = parent_guard.AsMut<InternalPage>();
-  
-  std::cout << "[CoalesceInternal] START: node_page=" << node_guard.GetPageId() 
-            << " node_size=" << node->GetSize() 
-            << " sibling_page=" << sibling_guard.GetPageId() 
-            << " sibling_size=" << sibling->GetSize() 
+
+  std::cout << "[CoalesceInternal] START: node_page=" << node_guard.GetPageId() << " node_size=" << node->GetSize()
+            << " sibling_page=" << sibling_guard.GetPageId() << " sibling_size=" << sibling->GetSize()
             << " is_predecessor=" << is_predecessor << std::endl;
-  
+
   // Determine recipient (left) and donor (right)
   InternalPage *recipient;
   InternalPage *donor;
   page_id_t page_to_delete;
   int parent_key_to_remove;
   KeyType separator_key;
-  
+
   if (is_predecessor) {
     // Merge node into sibling: sibling (left) ← node (right)
     recipient = sibling;
@@ -1066,7 +1054,7 @@ void BPLUSTREE_TYPE::CoalesceInternal(WritePageGuard &node_guard,
     parent_key_to_remove = node_index;
     separator_key = parent->KeyAt(node_index);
     std::cout << "[CoalesceInternal] Merging node INTO sibling (sibling=left, node=right)" << std::endl;
-    std::cout << "[CoalesceInternal] page_to_delete=" << page_to_delete 
+    std::cout << "[CoalesceInternal] page_to_delete=" << page_to_delete
               << " parent_key_to_remove_index=" << parent_key_to_remove << std::endl;
   } else {
     // Merge sibling into node: node (left) ← sibling (right)
@@ -1076,19 +1064,19 @@ void BPLUSTREE_TYPE::CoalesceInternal(WritePageGuard &node_guard,
     parent_key_to_remove = sibling_index;
     separator_key = parent->KeyAt(sibling_index);
     std::cout << "[CoalesceInternal] Merging sibling INTO node (node=left, sibling=right)" << std::endl;
-    std::cout << "[CoalesceInternal] page_to_delete=" << page_to_delete 
+    std::cout << "[CoalesceInternal] page_to_delete=" << page_to_delete
               << " parent_key_to_remove_index=" << parent_key_to_remove << std::endl;
   }
-  
+
   int recipient_old_size = recipient->GetSize();
-  std::cout << "[CoalesceInternal] recipient_old_size=" << recipient_old_size 
-            << " donor_size=" << donor->GetSize() << std::endl;
-  
+  std::cout << "[CoalesceInternal] recipient_old_size=" << recipient_old_size << " donor_size=" << donor->GetSize()
+            << std::endl;
+
   // Step 1: Append the separator key from parent
   recipient->SetKeyAt(recipient_old_size, separator_key);
   // recipient->SetSize(recipient_old_size + 1);
   std::cout << "[CoalesceInternal] Appended separator key, recipient_size=" << recipient->GetSize() << std::endl;
-  
+
   // Step 2: Copy all entries from donor to recipient
   for (int i = 0; i < donor->GetSize(); i++) {
     recipient->SetValueAt(recipient_old_size + i, donor->ValueAt(i));
@@ -1100,23 +1088,32 @@ void BPLUSTREE_TYPE::CoalesceInternal(WritePageGuard &node_guard,
   }
   std::cout << "[CoalesceInternal] Copied " << (donor->GetSize() - 1) << " keys from donor" << std::endl;
 
-  recipient->SetSize(recipient_old_size + 1 + donor->GetSize());
+  // recipient->SetSize(recipient_old_size + 1 + donor->GetSize());
+  recipient->SetSize(recipient_old_size + donor->GetSize());
   std::cout << "[CoalesceInternal] After copy, recipient_size=" << recipient->GetSize() << std::endl;
-  
+
   // Step 3: Remove entry from parent
   std::cout << "[CoalesceInternal] Removing entry from parent at index " << parent_key_to_remove << std::endl;
   parent->RemoveAt(parent_key_to_remove);
   std::cout << "[CoalesceInternal] Parent size after removal=" << parent->GetSize() << std::endl;
-  
+
   // Step 4: Delete the merged page
   std::cout << "[CoalesceInternal] Deleting page " << page_to_delete << std::endl;
   bpm_->DeletePage(page_to_delete);
-  
+
+  if (is_predecessor) {
+    std::cout << "[CoalesceInternal] Dropping node_guard (page " << node_guard.GetPageId() << ")" << std::endl;
+    node_guard.Drop();
+  } else {
+    std::cout << "[CoalesceInternal] Dropping sibling_guard (page " << sibling_guard.GetPageId() << ")" << std::endl;
+    sibling_guard.Drop();
+  }
+
   // Step 5: Handle parent underflow
   bool parent_is_root = ctx.IsRootPage(parent_guard.GetPageId());
-  std::cout << "[CoalesceInternal] parent_is_root=" << parent_is_root 
-            << " parent_size=" << parent->GetSize() << std::endl;
-  
+  std::cout << "[CoalesceInternal] parent_is_root=" << parent_is_root << " parent_size=" << parent->GetSize()
+            << std::endl;
+
   if (parent_is_root && parent->GetSize() == 1) {
     // Parent was root and now has only one child - make child new root
     std::cout << "[CoalesceInternal] Parent is root with only 1 child, promoting child to root" << std::endl;
@@ -1124,9 +1121,12 @@ void BPLUSTREE_TYPE::CoalesceInternal(WritePageGuard &node_guard,
     page_id_t new_root = parent->ValueAt(0);
     std::cout << "[CoalesceInternal] New root page_id=" << new_root << std::endl;
     header->root_page_id_ = new_root;
+    ctx.root_page_id_ = new_root;
     page_id_t old_root = parent_guard.GetPageId();
+    parent_guard.Drop();
     std::cout << "[CoalesceInternal] Deleting old root page " << old_root << std::endl;
     bpm_->DeletePage(old_root);
+
   } else if (!parent_is_root && parent->GetSize() < parent->GetMinSize()) {
     // Parent underflow - recursively handle
     std::cout << "[CoalesceInternal] Parent underflow detected, recursively handling" << std::endl;
@@ -1136,7 +1136,6 @@ void BPLUSTREE_TYPE::CoalesceInternal(WritePageGuard &node_guard,
     std::cout << "[CoalesceInternal] Parent is fine, putting back in write_set" << std::endl;
     ctx.write_set_.push_back(std::move(parent_guard));
   }
-  
   std::cout << "[CoalesceInternal] COMPLETE" << std::endl;
 }
 

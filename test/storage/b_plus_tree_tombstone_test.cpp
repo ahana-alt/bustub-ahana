@@ -15,7 +15,7 @@ namespace bustub {
 
 using bustub::DiskManagerUnlimitedMemory;
 
-TEST(BPlusTreeTests, DISABLED_TombstoneBasicTest) {
+TEST(BPlusTreeTests, TombstoneBasicTest) {
   auto key_schema = ParseCreateStatement("a bigint");
   GenericComparator<8> comparator(key_schema.get());
 

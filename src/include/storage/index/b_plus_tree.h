@@ -106,31 +106,19 @@ class BPlusTree {
 
   void CoalesceOrRedistribute(WritePageGuard &node_guard, Context &ctx);
 
-  void Redistribute(WritePageGuard &node_guard,
-                                  WritePageGuard &sibling_guard,
-                                  WritePageGuard &parent_guard,
-                                  int node_index, int sibling_index,
-                                  bool is_predecessor);
+  void Redistribute(WritePageGuard &node_guard, WritePageGuard &sibling_guard, WritePageGuard &parent_guard,
+                    int node_index, int sibling_index, bool is_predecessor);
 
-  void Coalesce(WritePageGuard &node_guard,
-                               WritePageGuard &sibling_guard,
-                               WritePageGuard &parent_guard,
-                               int node_index, int sibling_index,
-                               bool is_predecessor, Context &ctx);
+  void Coalesce(WritePageGuard &node_guard, WritePageGuard &sibling_guard, WritePageGuard &parent_guard, int node_index,
+                int sibling_index, bool is_predecessor, Context &ctx);
 
   void CoalesceOrRedistributeInternal(WritePageGuard &node_guard, Context &ctx);
 
-  void RedistributeInternal(WritePageGuard &node_guard,
-                                          WritePageGuard &sibling_guard,
-                                          WritePageGuard &parent_guard,
-                                          int node_index, int sibling_index,
-                                          bool is_predecessor);
+  void RedistributeInternal(WritePageGuard &node_guard, WritePageGuard &sibling_guard, WritePageGuard &parent_guard,
+                            int node_index, int sibling_index, bool is_predecessor);
 
-  void CoalesceInternal(WritePageGuard &node_guard,
-                                      WritePageGuard &sibling_guard,
-                                      WritePageGuard &parent_guard,
-                                      int node_index, int sibling_index,
-                                      bool is_predecessor, Context &ctx);
+  void CoalesceInternal(WritePageGuard &node_guard, WritePageGuard &sibling_guard, WritePageGuard &parent_guard,
+                        int node_index, int sibling_index, bool is_predecessor, Context &ctx);
 
   void HandleLeafUnderflow(LeafPage *leaf, WritePageGuard leaf_guard, Context &ctx);
 

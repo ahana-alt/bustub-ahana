@@ -101,6 +101,10 @@ class BPlusTree {
   // Remove a key and its value from this B+ tree.
   void Remove(const KeyType &key);
 
+  auto TryRemoveOptimistic(const KeyType &key) -> bool;
+
+  void RemovePessimistic(const KeyType &key);
+
   void PrintTree(std::ostream &out = std::cout);
   void PrintTreeHelper(page_id_t page_id, int depth, std::ostream &out);
 

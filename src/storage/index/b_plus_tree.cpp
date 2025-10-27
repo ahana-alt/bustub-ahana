@@ -376,6 +376,128 @@ auto BPLUSTREE_TYPE::SplitInternal(InternalPage *old_internal, WritePageGuard ol
  */
 FULL_INDEX_TEMPLATE_ARGUMENTS
 void BPLUSTREE_TYPE::Remove(const KeyType &key) {
+  std::cout << "[Remove] Starting optimistic removal" << std::endl;
+
+  // Try optimistic approach first
+  if (TryRemoveOptimistic(key)) {
+    std::cout << "[Remove] Optimistic removal succeeded" << std::endl;
+    return;
+  }
+
+  // Optimistic failed - fall back to pessimistic
+  std::cout << "[Remove] Falling back to pessimistic removal" << std::endl;
+  RemovePessimistic(key);
+}
+
+FULL_INDEX_TEMPLATE_ARGUMENTS
+auto BPLUSTREE_TYPE::TryRemoveOptimistic(const KeyType &key) -> bool {
+  std::cout << "[RemoveOpt] Starting optimistic attempt" << std::endl;
+
+  auto header_guard = bpm_->ReadPage(header_page_id_);
+  auto *header = header_guard.As<BPlusTreeHeaderPage>();  
+  page_id_t root_page_id = header->root_page_id_;
+
+  if (root_page_id == INVALID_PAGE_ID) {  
+    return true;                          // Empty tree - nothing to remove
+  }
+
+  // Navigate to leaf with READ guards (optimistic!)
+  ReadPageGuard current_guard = bpm_->ReadPage(root_page_id);  
+
+  while (!current_guard.As<BPlusTreePage>()->IsLeafPage()) {
+    auto *internal = current_guard.As<InternalPage>();
+
+    page_id_t child_page_id = internal->ValueAt(0);
+    for (int i = 1; i < internal->GetSize(); i++) {
+      if (comparator_(key, internal->KeyAt(i)) < 0) {
+        break;
+      }
+      child_page_id = internal->ValueAt(i);
+    }
+
+    current_guard = bpm_->ReadPage(child_page_id);
+  }
+
+  std::cout << "[RemoveOpt] Reached leaf page " << current_guard.GetPageId() << std::endl;
+
+  // Save page ID before dropping read guard
+  page_id_t leaf_page_id = current_guard.GetPageId();
+  current_guard.Drop();  // Drop read guard BEFORE acquiring write guard
+
+  // Now get write guard
+  auto leaf_guard = bpm_->WritePage(leaf_page_id);
+  auto *leaf = leaf_guard.template AsMut<LeafPage>();
+
+  // Find key
+  int key_index = leaf->FindKey(key, comparator_);
+  if (key_index == -1) {
+    std::cout << "[RemoveOpt] Key not found" << std::endl;
+    return true;  // Key doesn't exist - success
+  }
+
+  // Check if already tombstoned
+  if (NumTombs > 0 && leaf->AlreadyMarked(key, comparator_)) {
+    return true;
+  }
+
+  std::cout << "[RemoveOpt] Found key at index=" << key_index << std::endl;
+
+  int current_size = leaf->GetSize();
+  int current_tombs = leaf->GetTombstoneCount();
+  int predicted_effective_size;
+
+  if constexpr (NumTombs == 0) {
+    // Will physically remove 1 entry
+    predicted_effective_size = current_size - 1;
+  } else {
+    // if (current_tombs >= NumTombs) {
+    //   predicted_effective_size = current_size - current_tombs - 1;
+    // } else {
+    //   predicted_effective_size = current_size - current_tombs - 1;
+    // }
+    predicted_effective_size = current_size - current_tombs - 1;
+  }
+
+  bool is_root = (leaf_page_id == root_page_id);  
+
+  std::cout << "[RemoveOpt] predicted_effective_size=" << predicted_effective_size << ", is_root=" << is_root
+            << ", min_size=" << leaf->GetMinSize() << std::endl;
+
+  // Check if would cause underflow BEFORE modifying
+  if (!is_root && predicted_effective_size < leaf->GetMinSize()) {
+    std::cout << "[RemoveOpt] Would cause underflow, must use pessimistic" << std::endl;
+    return false;  // Don't modify - fall back to pessimistic
+  }
+
+  // Check if root would become empty
+  if (is_root && predicted_effective_size == 0) {
+    std::cout << "[RemoveOpt] Root will become empty, must use pessimistic" << std::endl;
+    return false;  // Let pessimistic handle root deletion
+  }
+
+  if constexpr (NumTombs == 0) {
+    leaf->RemoveAt(key_index);
+  } else {
+    if (leaf->GetTombstoneCount() >= NumTombs) {
+      std::cout << "[RemoveOpt] Processing tombstone" << std::endl;
+      leaf->ProcessTombstone();
+      key_index = leaf->FindKey(key, comparator_);
+      if (key_index == -1) {
+        return true;  // Key was processed away
+      }
+    }
+    leaf->AddTombstone(key_index);
+  }
+
+  std::cout << "[RemoveOpt] After removal - size=" << leaf->GetSize() << ", tombstones=" << leaf->GetTombstoneCount()
+            << std::endl;
+
+  std::cout << "[RemoveOpt] Success - no underflow!" << std::endl;
+  return true;  // Success!
+}
+
+FULL_INDEX_TEMPLATE_ARGUMENTS
+void BPLUSTREE_TYPE::RemovePessimistic(const KeyType &key) {
   std::cout << "[Remove] Starting removal, NumTombs=" << NumTombs << std::endl;
   Context ctx;
   ctx.header_page_ = bpm_->WritePage(header_page_id_);
@@ -916,11 +1038,11 @@ void BPLUSTREE_TYPE::CoalesceOrRedistributeInternal(WritePageGuard &node_guard, 
       // Merge node and sibling together
       if (is_predecessor) {
         // sibling is left, node is right - merge node into sibling
-        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        // NOLINTNEXTLINE
         CoalesceInternal(node_guard, sibling_guard, parent_guard, node_index, sibling_index, is_predecessor, ctx);
       } else {
         // sibling is right, node is left - merge sibling into node
-        // NOLINTNEXTLINE(readability-suspicious-call-argument)
+        // NOLINTNEXTLINE
         CoalesceInternal(sibling_guard, node_guard, parent_guard, sibling_index, node_index, !is_predecessor, ctx);
       }
       return;  // CoalesceInternal handles parent

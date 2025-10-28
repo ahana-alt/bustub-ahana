@@ -144,7 +144,7 @@ TEST(BPlusTreeTests, InsertTest1NoIterator) {
   delete bpm;
 }
 
-TEST(BPlusTreeTests, DISABLED_InsertTest2) {
+TEST(BPlusTreeTests, InsertTest2) {
   // create KeyComparator and index schema
   auto key_schema = ParseCreateStatement("a bigint");
   GenericComparator<8> comparator(key_schema.get());
@@ -176,6 +176,9 @@ TEST(BPlusTreeTests, DISABLED_InsertTest2) {
     int64_t value = key & 0xFFFFFFFF;
     EXPECT_EQ(rids[0].GetSlotNum(), value);
   }
+
+  std::cout << "=== Tree Structure after inserting everything===" << std::endl;
+  std::cout << tree.DrawBPlusTree() << std::endl;
 
   int64_t start_key = 1;
   int64_t current_key = start_key;

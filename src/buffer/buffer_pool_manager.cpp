@@ -235,13 +235,13 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
 
     // CRITICAL: Increment pin count WHILE holding bpm_latch_
     // This ensures atomicity with SetEvictable
-    // frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
+    frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
 
     // Release bpm_latch_ BEFORE acquiring frame lock to avoid deadlock
     lk.unlock();
     std::cout << "releasing bpm latch" << std::endl;
 
-    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_, false};
 
     return guard;
   }
@@ -259,7 +259,7 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
     replacer_->RecordAccess(fid, page_id, access_type);
     replacer_->SetEvictable(fid, false);
 
-    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_, true};
 
     lk.unlock();
 
@@ -301,7 +301,7 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
   replacer_->SetEvictable(victim, false);
 
   // Acquire lock, let guard increment pin count
-  WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+  WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_, true};
 
   std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_" << std::endl;
   lk.unlock();

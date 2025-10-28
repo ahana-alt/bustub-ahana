@@ -78,6 +78,8 @@ class BPlusTreeLeafPage : public BPlusTreePage {
   void SetKeyAt(int index, const KeyType &key);
   void SetValueAt(int index, const ValueType &value);
 
+  auto IsTombstone(int index) const -> bool;
+
   auto HasDuplicates(const KeyType &key, const KeyComparator &comparator) const -> bool;
 
   // Insert key-value at position, shifting everything right

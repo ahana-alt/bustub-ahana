@@ -93,6 +93,16 @@ auto B_PLUS_TREE_LEAF_PAGE_TYPE::HasDuplicates(const KeyType &key, const KeyComp
 }
 
 FULL_INDEX_TEMPLATE_ARGUMENTS
+auto B_PLUS_TREE_LEAF_PAGE_TYPE::IsTombstone(int index) const -> bool {
+  for (int i = 0; i < GetTombstoneCount(); i++) {
+    if (static_cast<int>(GetTombstoneAt(i)) == index) {
+      return true;
+    }
+  }
+  return false;
+}
+
+FULL_INDEX_TEMPLATE_ARGUMENTS
 void B_PLUS_TREE_LEAF_PAGE_TYPE::InsertAt(int index, const KeyType &key, const ValueType &value) {
   // Shift everything from index to the right
   for (int i = GetSize(); i > index; i--) {

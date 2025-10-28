@@ -37,13 +37,13 @@ auto ArcReplacer::Evict() -> std::optional<frame_id_t> {
       if (!fs || !fs->evictable_) {
         continue;
       }
+      
+      //suggested change
+      fs->evictable_ = false;
+      curr_size_--;
 
       // Erase using the stored iterator for O(1) removal
       alive_list.erase(std::next(rit).base());
-
-      if (curr_size_ > 0) {
-        curr_size_--;
-      }
 
       alive_map_.erase(mit);
 

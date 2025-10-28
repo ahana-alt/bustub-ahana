@@ -465,7 +465,7 @@ TEST(BPlusTreeConcurrentTest, DISABLED_InsertTest2) {  // NOLINT
   InsertTest2Call<3>();
 }
 
-TEST(BPlusTreeConcurrentTest, DISABLED_DeleteTest1) {  // NOLINT
+TEST(BPlusTreeConcurrentTest, DeleteTest1) {  // NOLINT
   DeleteTest1Call<0>();
   DeleteTest1Call<3>();
 }
@@ -480,7 +480,7 @@ TEST(BPlusTreeConcurrentTest, DISABLED_MixTest1) {  // NOLINT
   MixTest1Call<3>();
 }
 
-TEST(BPlusTreeConcurrentTest, DISABLED_MixTest2) {  // NOLINT
+TEST(BPlusTreeConcurrentTest, MixTest2) {  // NOLINT
   MixTest2Call<0>();
   MixTest2Call<3>();
 }

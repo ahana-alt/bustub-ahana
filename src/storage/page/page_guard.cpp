@@ -139,7 +139,7 @@ ReadPageGuard::~ReadPageGuard() {
 
 WritePageGuard::WritePageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> frame,
                                std::shared_ptr<ArcReplacer> replacer, std::shared_ptr<std::mutex> bpm_latch,
-                               std::shared_ptr<DiskScheduler> disk_scheduler)
+                               std::shared_ptr<DiskScheduler> disk_scheduler, bool increment_pin)
     : page_id_(page_id),
       frame_(std::move(frame)),
       replacer_(std::move(replacer)),
@@ -147,7 +147,9 @@ WritePageGuard::WritePageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> f
       disk_scheduler_(std::move(disk_scheduler)) {
   wlatch_ = std::unique_lock<std::shared_mutex>(frame_->rwlatch_);
   is_valid_ = true;
-  frame_->pin_count_.fetch_add(1, std::memory_order_relaxed);
+  if (increment_pin) {
+    frame_->pin_count_.fetch_add(1, std::memory_order_relaxed);
+  }
   std::cout << "[WritePageGuard::Constructor] page=" << page_id << " frame_id=" << frame_->frame_id_
             << " pin_count=" << frame_->pin_count_.load() << " owns_lock=" << wlatch_.owns_lock() << std::endl;
 }

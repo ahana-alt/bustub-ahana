@@ -1,50 +1,60 @@
 //===----------------------------------------------------------------------===//
 //
-//                         BusTub
+// BusTub
 //
 // index_iterator.h
 //
-// Identification: src/include/storage/index/index_iterator.h
-//
-// Copyright (c) 2015-2025, Carnegie Mellon University Database Group
-//
 //===----------------------------------------------------------------------===//
-
-/**
- * index_iterator.h
- * For range scan of b+ tree
- */
 #pragma once
 #include <utility>
+#include "buffer/buffer_pool_manager.h"  // ADD THIS LINE
 #include "buffer/traced_buffer_pool_manager.h"
 #include "common/config.h"
-#include "common/macros.h"
 #include "storage/page/b_plus_tree_leaf_page.h"
+#include "storage/page/page_guard.h"
 
 namespace bustub {
 
 #define INDEXITERATOR_TYPE IndexIterator<KeyType, ValueType, KeyComparator, NumTombs>
+
 #define SHORT_INDEXITERATOR_TYPE IndexIterator<KeyType, ValueType, KeyComparator>
 
 FULL_INDEX_TEMPLATE_ARGUMENTS_DEFN
 class IndexIterator {
+  using LeafPage = BPlusTreeLeafPage<KeyType, ValueType, KeyComparator, NumTombs>;
+
  public:
-  // you may define your own constructor based on your member variables
+  // Default constructor (for end iterator)
   IndexIterator();
-  ~IndexIterator();  // NOLINT
+
+  // Constructor with page_id directly
+  template <typename BPMType>
+  IndexIterator(BPMType *bpm, page_id_t page_id, int index, const KeyComparator &comparator)
+      : bpm_(static_cast<void *>(bpm)), page_id_(page_id), index_(index) {
+    (void)comparator;
+    std::cout << "[Iterator Constructor] bpm=" << bpm_ << " page_id=" << page_id_ << " index=" << index_ << std::endl;
+  }
+
+  ~IndexIterator() = default;
 
   auto IsEnd() -> bool;
 
-  auto operator*() -> std::pair<const KeyType &, const ValueType &>;
+  auto operator*() -> std::pair<KeyType, ValueType>;
 
   auto operator++() -> IndexIterator &;
 
-  auto operator==(const IndexIterator &itr) const -> bool { UNIMPLEMENTED("TODO(P2): Add implementation."); }
+  auto operator==(const IndexIterator &other) const -> bool;
 
-  auto operator!=(const IndexIterator &itr) const -> bool { UNIMPLEMENTED("TODO(P2): Add implementation."); }
+  auto operator!=(const IndexIterator &other) const -> bool;
 
  private:
-  // add your own private member variables here
+  void *bpm_{nullptr};
+  page_id_t page_id_{INVALID_PAGE_ID};
+  int index_{0};
+  mutable bool initialized_{false};
+
+  void AdvanceToValidEntry();
+  void Initialize() const;
 };
 
 }  // namespace bustub

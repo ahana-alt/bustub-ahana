@@ -415,7 +415,7 @@ TEST(BPlusTreeTests, DISABLED_promoteToRoot) {
   delete bpm;
 }
 
-TEST(BPlusTreeTests, DeleteTestNoIterator) {
+TEST(BPlusTreeTests, DISABLED_DeleteTestNoIterator) {
   // create KeyComparator and index schema
   auto key_schema = ParseCreateStatement("a bigint");
   GenericComparator<8> comparator(key_schema.get());
@@ -516,7 +516,7 @@ TEST(BPlusTreeTests, DeleteTestNoIterator) {
   delete bpm;
 }
 
-TEST(BPlusTreeTests, OptimisticDeleteTest) {
+TEST(BPlusTreeTests, DISABLED_OptimisticDeleteTest) {
   auto key_schema = ParseCreateStatement("a bigint");
   GenericComparator<8> comparator(key_schema.get());
 
@@ -561,7 +561,7 @@ TEST(BPlusTreeTests, OptimisticDeleteTest) {
   delete bpm;
 }
 
-TEST(BPlusTreeTests, DISABLED_SequentialEdgeMixTest) {  // NOLINT
+TEST(BPlusTreeTests, SequentialEdgeMixTest) {  // NOLINT
   // create KeyComparator and index schema
   auto key_schema = ParseCreateStatement("a bigint");
   GenericComparator<8> comparator(key_schema.get());

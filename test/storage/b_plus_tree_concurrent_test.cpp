@@ -460,7 +460,7 @@ TEST(BPlusTreeConcurrentTest, DISABLED_InsertTest1) {  // NOLINT
   InsertTest1Call<3>();
 }
 
-TEST(BPlusTreeConcurrentTest, DISABLED_InsertTest2) {  // NOLINT
+TEST(BPlusTreeConcurrentTest, InsertTest2) {  // NOLINT
   InsertTest2Call<0>();
   InsertTest2Call<3>();
 }

@@ -65,16 +65,23 @@ auto BPLUSTREE_TYPE::GetValue(const KeyType &key, std::vector<ValueType> *result
   page_id_t current_page_id = header->root_page_id_;  // Integer assignment
   header_guard.Drop();
 
+  std::cout << "GETVALUE: Searching for key=" << key.ToString() 
+              << " root=" << current_page_id << std::endl;
+
   // Check if tree is empty
   if (current_page_id == INVALID_PAGE_ID) {
+    std::cout << "GETVALUE: Tree is empty" << std::endl;
     return false;
   }
 
   ReadPageGuard current_guard = bpm_->ReadPage(current_page_id);
-  auto current_page = current_guard.As<BPlusTreePage>();
 
-  while (!current_page->IsLeafPage()) {
+  while (!current_guard.As<BPlusTreePage>()->IsLeafPage()) {
     auto internal = current_guard.As<InternalPage>();
+
+    std::cout << "GETVALUE: At internal page=" << current_guard.GetPageId() 
+                  << " size=" << internal->GetSize() << std::endl;
+
     page_id_t child_page = internal->ValueAt(0);
 
     for (int i = 1; i < internal->GetSize(); i++) {
@@ -84,20 +91,33 @@ auto BPLUSTREE_TYPE::GetValue(const KeyType &key, std::vector<ValueType> *result
       child_page = internal->ValueAt(i);
     }
 
+    std::cout << "GETVALUE: Going to child page=" << child_page << std::endl;
+
     // Taking guard on each page and assigning it as B+ tree page, looping through
     // if it is an internal page
-    current_guard = bpm_->ReadPage(child_page);
-    current_page = current_guard.As<BPlusTreePage>();
+    ReadPageGuard child_guard = bpm_->ReadPage(child_page);
+    current_guard.Drop();
+    current_guard = std::move(child_guard);
     // Will exit if child page is a leaf
   }
 
   // Binary search on child_page
   auto leaf = current_guard.As<LeafPage>();
+  std::cout << "GETVALUE: At leaf page=" << current_guard.GetPageId() 
+              << " size=" << leaf->GetSize() << std::endl;
+  for (int i = 0; i < leaf->GetSize(); i++) {
+    std::cout << "  Leaf[" << i << "] = " << leaf->KeyAt(i).ToString() << std::endl;
+  }
   int index = leaf->KeyIndex(key, comparator_);
-  if (comparator_(leaf->KeyAt(index), key) == 0 && index < leaf->GetMaxSize()) {
+  std::cout << "GETVALUE: KeyIndex returned index=" << index << std::endl;
+
+  if (index < leaf->GetSize() && comparator_(leaf->KeyAt(index), key) == 0) {
+    std::cout << "GETVALUE: FOUND key at index=" << index << std::endl;
     result->push_back(leaf->ValueAt(index));
     return true;
   }
+
+  std::cout << "GETVALUE: NOT FOUND" << std::endl;
   return false;
 }
 
@@ -117,6 +137,7 @@ auto BPLUSTREE_TYPE::GetValue(const KeyType &key, std::vector<ValueType> *result
  */
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::Insert(const KeyType &key, const ValueType &value) -> bool {
+  std::cout << "\n=== INSERTING KEY=" << key.ToString() << " ===" << std::endl;
   Context ctx;
 
   // Use READ lock for header in optimistic path
@@ -131,6 +152,12 @@ auto BPLUSTREE_TYPE::Insert(const KeyType &key, const ValueType &value) -> bool 
     // Now get write lock
     ctx.header_page_ = bpm_->WritePage(header_page_id_);
     auto header_write = ctx.header_page_->AsMut<BPlusTreeHeaderPage>();
+
+    if (header_write->root_page_id_ != INVALID_PAGE_ID) {
+      // Tree is no longer empty, drop header and restart with pessimistic
+      ctx.header_page_.reset();
+      return InsertPessimistic(key, value);
+    }
 
     page_id_t new_page_id = bpm_->NewPage();
     WritePageGuard new_guard = bpm_->WritePage(new_page_id);
@@ -158,7 +185,9 @@ auto BPLUSTREE_TYPE::Insert(const KeyType &key, const ValueType &value) -> bool 
       child_page_id = internal->ValueAt(i);
     }
 
-    current_guard = bpm_->ReadPage(child_page_id);
+    ReadPageGuard child_guard = bpm_->ReadPage(child_page_id);
+    current_guard.Drop();
+    current_guard = std::move(child_guard);
   }
 
   // At leaf - check with READ lock
@@ -167,6 +196,7 @@ auto BPLUSTREE_TYPE::Insert(const KeyType &key, const ValueType &value) -> bool 
 
   // Check for duplicates
   if (leaf_read->HasDuplicates(key, comparator_)) {
+    current_guard.Drop();
     return false;
   }
 
@@ -176,28 +206,42 @@ auto BPLUSTREE_TYPE::Insert(const KeyType &key, const ValueType &value) -> bool 
 
   // OPTIMISTIC PATH
   if (is_safe) {
+    // Log before dropping
+    std::cout << "OPTIMISTIC: leaf_page_id=" << leaf_page_id 
+              << " size=" << leaf_read->GetSize() 
+              << " max=" << leaf_read->GetMaxSize() << std::endl;
+    
     current_guard.Drop();
-
-    WritePageGuard leaf_write = bpm_->WritePage(leaf_page_id);  // ONLY write!
+    WritePageGuard leaf_write = bpm_->WritePage(leaf_page_id);
     auto leaf = leaf_write.AsMut<LeafPage>();
-
+    
+    // Log after reacquiring
+    std::cout << "OPTIMISTIC REACQUIRED: leaf_page_id=" << leaf_page_id 
+              << " size=" << leaf->GetSize() 
+              << " max=" << leaf->GetMaxSize() << std::endl;
+    
     // Recheck duplicate
     if (leaf->HasDuplicates(key, comparator_)) {
-      return false;
+        std::cout << "OPTIMISTIC: Found duplicate for key" << std::endl;
+        return false;
     }
-
+    
     // Process tombstones if needed
     if (leaf->GetSize() >= leaf->GetMaxSize() && leaf->HasTombstones()) {
-      leaf->ProcessAllTombstones();
+        std::cout << "OPTIMISTIC: Processing tombstones" << std::endl;
+        leaf->ProcessAllTombstones();
     }
-
+    
     // Try insert
     if (leaf->GetSize() < leaf->GetMaxSize()) {
-      int index = leaf->KeyIndex(key, comparator_);
-      leaf->InsertAt(index, key, value);
-      return true;  // SUCCESS - ONLY 1 WRITE!
+        int index = leaf->KeyIndex(key, comparator_);
+        std::cout << "OPTIMISTIC INSERT: key=" << key.ToString() 
+                  << " index=" << index << " size=" << leaf->GetSize() << std::endl;
+        leaf->InsertAt(index, key, value);
+        return true;
     }
-
+    
+    std::cout << "OPTIMISTIC FAILED: leaf still full, going pessimistic" << std::endl;
     leaf_write.Drop();
   } else {
     current_guard.Drop();
@@ -211,6 +255,7 @@ auto BPLUSTREE_TYPE::Insert(const KeyType &key, const ValueType &value) -> bool 
 // just get make this function to have a write_set_
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::InsertPessimistic(const KeyType &key, const ValueType &value) -> bool {
+  std::cout << "PESSIMISTIC INSERT key=" << key.ToString() << std::endl;
   Context ctx;
 
   ctx.header_page_ = bpm_->WritePage(header_page_id_);
@@ -230,7 +275,16 @@ auto BPLUSTREE_TYPE::InsertPessimistic(const KeyType &key, const ValueType &valu
       child_page_id = internal->ValueAt(i);
     }
 
+    // WritePageGuard child_guard = bpm_->WritePage(child_page_id);
+    // bool is_safe = (internal->GetSize() < internal->GetMaxSize());
+    // if (is_safe) {
+    //   // ctx.write_set_.clear();
+    //   // ctx.header_page_.reset();
+    // } else{
+    //   ctx.write_set_.push_back(std::move(current_guard));
+    // }
     ctx.write_set_.push_back(std::move(current_guard));
+
     current_guard = bpm_->WritePage(child_page_id);
   }
 
@@ -251,6 +305,8 @@ auto BPLUSTREE_TYPE::InsertPessimistic(const KeyType &key, const ValueType &valu
   if (leaf->GetSize() < leaf->GetMaxSize()) {
     int index = leaf->KeyIndex(key, comparator_);
     leaf->InsertAt(index, key, value);
+    // ctx.write_set_.clear();
+    // ctx.header_page_.reset();
     return true;  // Tombstone processing made room!
   }
 
@@ -262,6 +318,9 @@ FULL_INDEX_TEMPLATE_ARGUMENTS
 auto BPLUSTREE_TYPE::SplitLeaf(LeafPage *old_leaf, WritePageGuard old_leaf_guard, const KeyType &key,
                                const ValueType &value, Context &ctx) -> bool {
   page_id_t old_leaf_id = old_leaf_guard.GetPageId();
+  std::cout << "SPLITLEAF: old_leaf_id=" << old_leaf_id 
+              << " old_size=" << old_leaf->GetSize() 
+              << " inserting key=" << key.ToString() << std::endl;
 
   // Create new leaf
   page_id_t new_leaf_id = bpm_->NewPage();
@@ -272,6 +331,10 @@ auto BPLUSTREE_TYPE::SplitLeaf(LeafPage *old_leaf, WritePageGuard old_leaf_guard
   // Insert and split - all logic in leaf page
   KeyType push_up_key;
   old_leaf->InsertAndSplit(key, value, new_leaf, &push_up_key, comparator_);
+
+  std::cout << "AFTER SPLIT: old_size=" << old_leaf->GetSize() 
+              << " new_size=" << new_leaf->GetSize() 
+              << " push_up_key=" << push_up_key.ToString() << std::endl;
 
   // Fix linked list (set old leaf's next pointer)
   old_leaf->SetNextPageId(new_leaf_id);
@@ -305,10 +368,21 @@ auto BPLUSTREE_TYPE::InsertIntoParent(page_id_t left_page_id, const KeyType &key
     new_root->SetKeyAt(1, key);
     new_root->SetValueAt(1, right_page_id);
 
+    std::cout << "NEW ROOT created page=" << new_root_id << std::endl;
+    for (int i = 0; i < new_root->GetSize(); i++) {
+      if (i == 0) {
+        std::cout << "  Child[0]=" << new_root->ValueAt(0) << std::endl;
+      } else {
+        std::cout << "  Key[" << i << "]=" << new_root->KeyAt(i).ToString() 
+                  << " Child[" << i << "]=" << new_root->ValueAt(i) << std::endl;
+      }
+    }
+
     // Update header
     auto header = ctx.header_page_->AsMut<BPlusTreeHeaderPage>();
     header->root_page_id_ = new_root_id;
 
+    ctx.header_page_.reset();
     return true;
   }
 
@@ -330,6 +404,17 @@ auto BPLUSTREE_TYPE::InsertIntoParent(page_id_t left_page_id, const KeyType &key
     }
 
     parent->InsertAt(pos + 1, key, right_page_id);
+    std::cout << "INSERTED INTO PARENT page=" << parent_id << std::endl;
+    for (int i = 0; i < parent->GetSize(); i++) {
+      if (i == 0) {
+        std::cout << "  Child[0]=" << parent->ValueAt(0) << std::endl;
+      } else {
+        std::cout << "  Key[" << i << "]=" << parent->KeyAt(i).ToString() 
+                  << " Child[" << i << "]=" << parent->ValueAt(i) << std::endl;
+      }
+    }
+    ctx.header_page_.reset();
+    ctx.write_set_.clear();
     return true;
   }
 

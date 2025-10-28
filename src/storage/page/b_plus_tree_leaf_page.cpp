@@ -216,7 +216,7 @@ void B_PLUS_TREE_LEAF_PAGE_TYPE::InsertAndSplit(const KeyType &key, const ValueT
 
   // Update linked list
   recipient->SetNextPageId(GetNextPageId());
-  SetNextPageId(INVALID_PAGE_ID);  // Will be set by caller
+  // SetNextPageId(INVALID_PAGE_ID);  // Will be set by caller
 
   // Return middle key (first key of recipient)
   *middle_key = recipient->KeyAt(0);

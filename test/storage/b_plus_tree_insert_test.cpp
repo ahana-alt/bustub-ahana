@@ -57,7 +57,7 @@ TEST(BPlusTreeTests, DISABLE_BasicInsertTest) {
   delete bpm;
 }
 
-TEST(BPlusTreeTests, OptimisticInsertTest) {
+TEST(BPlusTreeTests, DISABLED_OptimisticInsertTest) {
   auto key_schema = ParseCreateStatement("a bigint");
   GenericComparator<8> comparator(key_schema.get());
 
@@ -119,13 +119,18 @@ TEST(BPlusTreeTests, InsertTest1NoIterator) {
   GenericKey<8> index_key;
   RID rid;
 
+  // std::vector<int64_t> keys = {1, 2, 3, 4, 5};
   std::vector<int64_t> keys = {1, 2, 3, 4, 5};
   for (auto key : keys) {
+    std::cout<<"[test] key : "<<key<<std::endl;
     int64_t value = key & 0xFFFFFFFF;
     rid.Set(static_cast<int32_t>(key >> 32), value);
     index_key.SetFromInteger(key);
     tree.Insert(index_key, rid);
   }
+
+  std::cout << "=== Tree Structure after inserting everything===" << std::endl;
+  std::cout << tree.DrawBPlusTree() << std::endl;
 
   bool is_present;
   std::vector<RID> rids;

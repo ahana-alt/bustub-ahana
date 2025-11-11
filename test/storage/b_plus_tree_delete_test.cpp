@@ -89,7 +89,7 @@ TEST(BPlusTreeTests, DISABLED_SimpleTombstoneMarkingTest) {
   page_id_t page_id = bpm->NewPage();
 
   // leaf_max_size=2, internal_max_size=3
-  BPlusTree<GenericKey<8>, RID, GenericComparator<8>, 1> tree("foo_pk", page_id, bpm, comparator, 2, 3);
+  BPlusTree<GenericKey<8>, RID, GenericComparator<8>, 0> tree("foo_pk", page_id, bpm, comparator, 3, 2);
   //                                                   ↑ Tombstone buffer = 1
 
   GenericKey<8> index_key;
@@ -615,6 +615,117 @@ TEST(BPlusTreeTests, SequentialEdgeMixTest) {  // NOLINT
       ASSERT_TRUE(res);
     }
   }
+
+  delete bpm;
+}
+
+TEST(BPlusTreeTests, DebugEmptyTreeTest) {
+  // create KeyComparator and index schema
+  auto key_schema = ParseCreateStatement("a bigint");
+  GenericComparator<8> comparator(key_schema.get());
+
+  auto disk_manager = std::make_unique<DiskManagerUnlimitedMemory>();
+  auto *bpm = new BufferPoolManager(50, disk_manager.get());
+
+  // create and fetch header_page
+  page_id_t page_id = bpm->NewPage();
+
+  // Create tree with NumTombs=2
+  BPlusTree<GenericKey<8>, RID, GenericComparator<8>, 0> tree("foo_pk", page_id, bpm, comparator, 2, 3);
+
+  GenericKey<8> index_key;
+  RID rid;
+
+  // Helper lambda to print tree state
+  auto print_tree_state = [&](const std::string &operation) {
+    std::cout << "\n=== AFTER " << operation << " ===" << std::endl;
+    std::cout << tree.DrawBPlusTree() << std::endl;
+
+    // Get root page id
+    auto header_guard = bpm->ReadPage(page_id);
+    auto *header = header_guard.template As<BPlusTreeHeaderPage>();
+    page_id_t root_id = header->root_page_id_;
+    std::cout << "Root page ID: " << root_id << std::endl;
+
+    if (root_id != INVALID_PAGE_ID) {
+      auto root_guard = bpm->ReadPage(root_id);
+      auto *root_page = root_guard.template As<BPlusTreePage>();
+
+      std::cout << "Root is " << (root_page->IsLeafPage() ? "LEAF" : "INTERNAL") << std::endl;
+
+      if (root_page->IsLeafPage()) {
+        auto *leaf = reinterpret_cast<const BPlusTreeLeafPage<GenericKey<8>, RID, GenericComparator<8>> *>(root_page);
+        std::cout << "Root leaf size: " << leaf->GetSize() << std::endl;
+        std::cout << "Root leaf tombstones: " << leaf->GetTombstoneCount() << std::endl;
+        std::cout << "Effective size: " << (leaf->GetSize() - leaf->GetTombstoneCount()) << std::endl;
+        std::cout << "Min size: " << leaf->GetMinSize() << std::endl;
+
+        std::cout << "Keys in root: ";
+        for (int i = 0; i < leaf->GetSize(); i++) {
+          int64_t key = leaf->KeyAt(i).ToString();
+          bool is_tombstoned = false;
+          for (int j = 0; j < leaf->GetTombstoneCount(); j++) {
+            if (leaf->GetTombstoneAt(j) == static_cast<size_t>(i)) {
+              is_tombstoned = true;
+              break;
+            }
+          }
+          std::cout << key << (is_tombstoned ? "[T]" : "") << " ";
+        }
+        std::cout << std::endl;
+      }
+    }
+  };
+
+  // Insert keys 1-5
+  std::vector<int64_t> keys = {1, 2, 3, 4, 5};
+  for (auto key : keys) {
+    int64_t value = key & 0xFFFFFFFF;
+    rid.Set(static_cast<int32_t>(key >> 32), value);
+    index_key.SetFromInteger(key);
+    tree.Insert(index_key, rid);
+    print_tree_state("INSERT " + std::to_string(key));
+  }
+
+  // Remove keys in the order that causes the issue
+  // std::vector<int64_t> remove_order = {1, 5, 3, 4, 2};
+  std::vector<int64_t> remove_order = {1, 5, 3, 4, 2};
+  for (auto key : remove_order) {
+    index_key.SetFromInteger(key);
+    std::cout << "\n>>> REMOVING KEY " << key << " <<<" << std::endl;
+    tree.Remove(index_key);
+    print_tree_state("REMOVE " + std::to_string(key));
+
+    // Check if tree should be empty
+    auto header_guard = bpm->ReadPage(page_id);
+    auto *header = header_guard.template As<BPlusTreeHeaderPage>();
+    page_id_t root_id = header->root_page_id_;
+
+    if (root_id != INVALID_PAGE_ID) {
+      auto root_guard = bpm->ReadPage(root_id);
+      auto *root_page = root_guard.template As<BPlusTreePage>();
+      if (root_page->IsLeafPage()) {
+        auto *leaf = reinterpret_cast<const BPlusTreeLeafPage<GenericKey<8>, RID, GenericComparator<8>> *>(root_page);
+        int effective_size = leaf->GetSize() - leaf->GetTombstoneCount();
+        std::cout << ">>> Effective size after removal: " << effective_size << std::endl;
+
+        if (effective_size == 0) {
+          std::cout << ">>> WARNING: Root leaf has effective size 0 but tree still exists!" << std::endl;
+        }
+      }
+    }
+  }
+
+  // // Final check
+  // auto header_guard = bpm->ReadPage(page_id);
+  // auto *header = header_guard.template As<BPlusTreeHeaderPage>();
+  // page_id_t final_root_id = header->root_page_id_;
+
+  // std::cout << "\n=== FINAL STATE ===" << std::endl;
+  // std::cout << "Final root page ID: " << final_root_id << std::endl;
+  // std::cout << "Expected: " << INVALID_PAGE_ID << std::endl;
+
+  // EXPECT_EQ(final_root_id, INVALID_PAGE_ID) << "Tree should be empty after removing all keys!";
 
   delete bpm;
 }

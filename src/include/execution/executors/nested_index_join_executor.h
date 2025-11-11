@@ -13,6 +13,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "execution/executor_context.h"
 #include "execution/executors/abstract_executor.h"
@@ -39,5 +40,21 @@ class NestedIndexJoinExecutor : public AbstractExecutor {
  private:
   /** The nested index join plan node. */
   const NestedIndexJoinPlanNode *plan_;
+
+  /** The child executor (outer table) */
+  std::unique_ptr<AbstractExecutor> child_executor_;
+
+  /** Current outer tuple being processed */
+  Tuple outer_tuple_;
+  RID outer_rid_;
+
+  /** Whether we have a valid outer tuple */
+  bool has_outer_tuple_{false};
+
+  /** RIDs of inner tuples matching the current outer tuple */
+  std::vector<RID> inner_rids_;
+
+  /** Index into the inner RIDs for the current outer tuple */
+  size_t inner_rid_idx_{0};
 };
 }  // namespace bustub

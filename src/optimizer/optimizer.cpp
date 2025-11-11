@@ -24,6 +24,7 @@ auto Optimizer::Optimize(const AbstractPlanNodeRef &plan) -> AbstractPlanNodeRef
     p = OptimizeMergeProjection(p);
     p = OptimizeMergeFilterNLJ(p);
     p = OptimizeNLJAsIndexJoin(p);
+    p = OptimizeSortLimitAsTopN(p);
     p = OptimizeOrderByAsIndexScan(p);
     p = OptimizeMergeFilterScan(p);
     p = OptimizeSeqScanAsIndexScan(p);

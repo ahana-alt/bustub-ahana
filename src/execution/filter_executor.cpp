@@ -44,15 +44,25 @@ auto FilterExecutor::Next(Tuple *tuple, RID *rid) -> bool {
   while (true) {
     // Get the next tuple
     const auto status = child_executor_->Next(tuple, rid);
-
     if (!status) {
+      std::cout << "FilterExecutor: child returned false, no more tuples" << std::endl;
       return false;
     }
 
+    // Debug: print the tuple
+    auto v1_value = tuple->GetValue(&child_executor_->GetOutputSchema(), 0);
+    std::cout << "FilterExecutor: evaluating tuple with v1=" << v1_value.ToString() << std::endl;
+
     auto value = filter_expr->Evaluate(tuple, child_executor_->GetOutputSchema());
+
+    std::cout << "FilterExecutor: predicate result=" << value.ToString() << ", IsNull=" << value.IsNull()
+              << ", GetAs<bool>=" << (value.IsNull() ? "N/A" : (value.GetAs<bool>() ? "true" : "false")) << std::endl;
+
     if (!value.IsNull() && value.GetAs<bool>()) {
+      std::cout << "FilterExecutor: PASSING tuple" << std::endl;
       return true;
     }
+    std::cout << "FilterExecutor: FILTERING OUT tuple" << std::endl;
   }
 }
 

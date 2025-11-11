@@ -72,6 +72,7 @@ void INDEXITERATOR_TYPE::AdvanceToValidEntry() {
     page_id_ = next_page_id;
     index_ = 0;
   }
+  index_ = 0;
 }
 
 /**
@@ -123,6 +124,8 @@ auto INDEXITERATOR_TYPE::operator++() -> INDEXITERATOR_TYPE & {
  */
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto INDEXITERATOR_TYPE::operator==(const INDEXITERATOR_TYPE &other) const -> bool {
+  Initialize();  // Initialize this iterator first
+  other.Initialize();
   bool result = page_id_ == other.page_id_ && index_ == other.index_;
   std::cout << "[Iterator::operator==] this: page_id_=" << page_id_ << " index_=" << index_
             << " other: page_id_=" << other.page_id_ << " index_=" << other.index_ << " result=" << result << std::endl;

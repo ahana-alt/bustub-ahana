@@ -1,4 +1,3 @@
-
 //===----------------------------------------------------------------------===//
 //
 //                         BusTub
@@ -24,18 +23,19 @@ namespace bustub {
 
 ReadPageGuard::ReadPageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> frame,
                              std::shared_ptr<ArcReplacer> replacer, std::shared_ptr<std::mutex> bpm_latch,
-                             std::shared_ptr<DiskScheduler> disk_scheduler)
+                             std::unique_lock<std::mutex> bpm_lock, std::shared_ptr<DiskScheduler> disk_scheduler,
+                             bool increment_pin)
     : page_id_(page_id),
       frame_(std::move(frame)),
       replacer_(std::move(replacer)),
       bpm_latch_(std::move(bpm_latch)),
       disk_scheduler_(std::move(disk_scheduler)),
       is_valid_(true) {
+  if (increment_pin) {
+    frame_->pin_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  bpm_lock.unlock();
   rlatch_ = std::shared_lock<std::shared_mutex>(frame_->rwlatch_);
-  is_valid_ = true;
-  frame_->pin_count_.fetch_add(1, std::memory_order_relaxed);
-  std::cout << "[ReadPageGuard::Constructor] page=" << page_id << " frame_id=" << frame_->frame_id_
-            << " pin_count=" << frame_->pin_count_.load() << " owns_lock=" << rlatch_.owns_lock() << std::endl;
 }
 
 ReadPageGuard::ReadPageGuard(ReadPageGuard &&that) noexcept
@@ -46,14 +46,11 @@ ReadPageGuard::ReadPageGuard(ReadPageGuard &&that) noexcept
       disk_scheduler_(std::move(that.disk_scheduler_)),
       rlatch_(std::move(that.rlatch_)),
       is_valid_(that.is_valid_) {
-  std::cout << "[ReadPageGuard::MoveConstructor] page=" << page_id_ << " is_valid=" << is_valid_
-            << " owns_lock=" << rlatch_.owns_lock() << std::endl;
   that.is_valid_ = false;
 }
 
 auto ReadPageGuard::operator=(ReadPageGuard &&that) noexcept -> ReadPageGuard & {
   if (this != &that) {
-    std::cout << "[ReadPageGuard::MoveAssignment] from_page=" << that.page_id_ << " to_page=" << page_id_ << std::endl;
     Drop();
     page_id_ = that.page_id_;
     frame_ = std::move(that.frame_);
@@ -83,7 +80,6 @@ auto ReadPageGuard::IsDirty() const -> bool {
 }
 
 void ReadPageGuard::Flush() {
-  std::cout << "[ReadPageGuard::Flush] page=" << page_id_ << std::endl;
   if (!frame_->is_dirty_) {
     return;
   }
@@ -99,59 +95,42 @@ void ReadPageGuard::Flush() {
 
 void ReadPageGuard::Drop() {
   if (!is_valid_) {
-    std::cout << "[ReadPageGuard::Drop] SKIPPED page=" << page_id_ << " (already invalid)" << std::endl;
     return;
   }
 
-  std::cout << "[ReadPageGuard::Drop] START page=" << page_id_ << " pin_count=" << frame_->pin_count_.load()
-            << " owns_lock=" << rlatch_.owns_lock() << std::endl;
-
   is_valid_ = false;
 
-  // std::cout << "[ReadPageGuard::Drop] Releasing shared lock, page=" << page_id_ << " prev_pin=" << prev
-  //           << " new_pin=" << (prev - 1) << std::endl;
   if (rlatch_.owns_lock()) {
     rlatch_.unlock();
   }
 
-  std::cout << "[ReadPageGuard::Drop] ACQUIRING bpm_latch_ page=" << page_id_ << std::endl;
   std::scoped_lock lk(*bpm_latch_);
-
   size_t prev = frame_->pin_count_.fetch_sub(1, std::memory_order_relaxed);
 
   if (prev == 1) {
-    std::cout << "[ReadPageGuard::Drop] SetEvictable(true) page=" << page_id_ << " frame_id=" << frame_->frame_id_
-              << std::endl;
     replacer_->SetEvictable(frame_->frame_id_, true);
-    std::cout << "[ReadPageGuard::Drop] RELEASING bpm_latch_ page=" << page_id_ << std::endl;
   }
-
-  std::cout << "[ReadPageGuard::Drop] COMPLETE page=" << page_id_ << std::endl;
 }
 
-ReadPageGuard::~ReadPageGuard() {
-  std::cout << "[ReadPageGuard::Destructor] page=" << page_id_ << " is_valid=" << is_valid_ << std::endl;
-  // frame_->pin_count_.fetch_sub(1, std::memory_order_relaxed);
-  Drop();
-}
+ReadPageGuard::~ReadPageGuard() { Drop(); }
 
 /**********************************************************************************************************************/
 
 WritePageGuard::WritePageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> frame,
                                std::shared_ptr<ArcReplacer> replacer, std::shared_ptr<std::mutex> bpm_latch,
-                               std::shared_ptr<DiskScheduler> disk_scheduler, bool increment_pin)
+                               std::unique_lock<std::mutex> bpm_lock, std::shared_ptr<DiskScheduler> disk_scheduler,
+                               bool increment_pin)
     : page_id_(page_id),
       frame_(std::move(frame)),
       replacer_(std::move(replacer)),
       bpm_latch_(std::move(bpm_latch)),
-      disk_scheduler_(std::move(disk_scheduler)) {
-  wlatch_ = std::unique_lock<std::shared_mutex>(frame_->rwlatch_);
-  is_valid_ = true;
+      disk_scheduler_(std::move(disk_scheduler)),
+      is_valid_(true) {
   if (increment_pin) {
-    frame_->pin_count_.fetch_add(1, std::memory_order_relaxed);
+    frame_->pin_count_.fetch_add(1);
   }
-  std::cout << "[WritePageGuard::Constructor] page=" << page_id << " frame_id=" << frame_->frame_id_
-            << " pin_count=" << frame_->pin_count_.load() << " owns_lock=" << wlatch_.owns_lock() << std::endl;
+  bpm_lock.unlock();
+  wlatch_ = std::unique_lock<std::shared_mutex>(frame_->rwlatch_);
 }
 
 WritePageGuard::WritePageGuard(WritePageGuard &&that) noexcept
@@ -162,14 +141,11 @@ WritePageGuard::WritePageGuard(WritePageGuard &&that) noexcept
       disk_scheduler_(std::move(that.disk_scheduler_)),
       wlatch_(std::move(that.wlatch_)),
       is_valid_(that.is_valid_) {
-  std::cout << "[WritePageGuard::MoveConstructor] page=" << page_id_ << " is_valid=" << is_valid_
-            << " owns_lock=" << wlatch_.owns_lock() << std::endl;
   that.is_valid_ = false;
 }
 
 auto WritePageGuard::operator=(WritePageGuard &&that) noexcept -> WritePageGuard & {
   if (this != &that) {
-    std::cout << "[WritePageGuard::MoveAssignment] from_page=" << that.page_id_ << " to_page=" << page_id_ << std::endl;
     Drop();
     page_id_ = that.page_id_;
     frame_ = std::move(that.frame_);
@@ -205,7 +181,6 @@ auto WritePageGuard::IsDirty() const -> bool {
 }
 
 void WritePageGuard::Flush() {
-  std::cout << "[WritePageGuard::Flush] page=" << page_id_ << std::endl;
   if (!frame_->is_dirty_) {
     return;
   }
@@ -221,39 +196,23 @@ void WritePageGuard::Flush() {
 
 void WritePageGuard::Drop() {
   if (!is_valid_) {
-    std::cout << "[WritePageGuard::Drop] SKIPPED page=" << page_id_ << " (already invalid)" << std::endl;
     return;
   }
 
-  std::cout << "[WritePageGuard::Drop] START page=" << page_id_ << " pin_count=" << frame_->pin_count_.load()
-            << " owns_lock=" << wlatch_.owns_lock() << std::endl;
-
   is_valid_ = false;
 
-  // std::cout << "[WritePageGuard::Drop] Releasing exclusive lock, page=" << page_id_ << " prev_pin=" << prev
-  //           << " new_pin=" << (prev - 1) << std::endl;
   if (wlatch_.owns_lock()) {
     wlatch_.unlock();
   }
 
-  std::cout << "[WritePageGuard::Drop] ACQUIRING bpm_latch_ page=" << page_id_ << std::endl;
   std::scoped_lock lk(*bpm_latch_);
-
   const size_t prev = frame_->pin_count_.fetch_sub(1, std::memory_order_relaxed);
 
   if (prev == 1) {
-    std::cout << "[WritePageGuard::Drop] SetEvictable(true) page=" << page_id_ << " frame_id=" << frame_->frame_id_
-              << std::endl;
     replacer_->SetEvictable(frame_->frame_id_, true);
   }
-
-  std::cout << "[WritePageGuard::Drop] COMPLETE page=" << page_id_ << std::endl;
 }
 
-WritePageGuard::~WritePageGuard() {
-  std::cout << "[WritePageGuard::Destructor] page=" << page_id_ << " is_valid=" << is_valid_ << std::endl;
-  // frame_->pin_count_.fetch_sub(1, std::memory_order_relaxed);
-  Drop();
-}
+WritePageGuard::~WritePageGuard() { Drop(); }
 
 }  // namespace bustub

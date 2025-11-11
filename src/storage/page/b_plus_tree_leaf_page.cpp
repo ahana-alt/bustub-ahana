@@ -86,6 +86,9 @@ FULL_INDEX_TEMPLATE_ARGUMENTS
 auto B_PLUS_TREE_LEAF_PAGE_TYPE::HasDuplicates(const KeyType &key, const KeyComparator &comparator) const -> bool {
   for (int i = 0; i < GetSize(); i++) {
     if (comparator(KeyAt(i), key) == 0) {
+      if (IsTombstone(i)) {
+        continue;  // Skip tombstoned entries
+      }
       return true;
     }
   }
@@ -237,8 +240,46 @@ void B_PLUS_TREE_LEAF_PAGE_TYPE::SetTombstones(const std::vector<size_t> &tombs)
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto B_PLUS_TREE_LEAF_PAGE_TYPE::GetTombstoneAt(size_t index) const -> size_t { return tombstones_[index]; }
 
+// FULL_INDEX_TEMPLATE_ARGUMENTS
+// auto B_PLUS_TREE_LEAF_PAGE_TYPE::GetActiveSize() const -> int {
+//   return GetSize() - GetTombstoneCount();
+// }
+
+// Add to b_plus_tree_leaf_page.cpp:
+// FULL_INDEX_TEMPLATE_ARGUMENTS
+// void B_PLUS_TREE_LEAF_PAGE_TYPE::ClearTombstoneForKey(const KeyType &key, const KeyComparator &comparator) {
+//   // Find and remove tombstone for this key
+//   for (int i = 0; i < GetTombstoneCount(); i++) {
+//     size_t tomb_idx = GetTombstoneAt(i);
+//     if (tomb_idx < static_cast<size_t>(GetSize()) && comparator(KeyAt(tomb_idx), key) == 0) {
+//       // Remove this tombstone from the buffer by shifting left
+//       for (int j = i; j < GetTombstoneCount() - 1; j++) {
+//         tombstones_[j] = tombstones_[j + 1];
+//       }
+//       num_tombstones_--;
+//       return;
+//     }
+//   }
+// }
+
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto B_PLUS_TREE_LEAF_PAGE_TYPE::HasTombstones() const -> bool { return num_tombstones_ > 0; }
+
+FULL_INDEX_TEMPLATE_ARGUMENTS
+void B_PLUS_TREE_LEAF_PAGE_TYPE::ClearTombstoneForKey(const KeyType &key, const KeyComparator &comparator) {
+  // Find and remove tombstone for this key
+  for (int i = 0; i < GetTombstoneCount(); i++) {
+    size_t tomb_idx = GetTombstoneAt(i);
+    if (tomb_idx < static_cast<size_t>(GetSize()) && comparator(KeyAt(tomb_idx), key) == 0) {
+      // Found the tombstone for this key - remove it from the buffer by shifting left
+      for (int j = i; j < GetTombstoneCount() - 1; j++) {
+        tombstones_[j] = tombstones_[j + 1];
+      }
+      num_tombstones_--;
+      return;
+    }
+  }
+}
 
 // add to .h file
 FULL_INDEX_TEMPLATE_ARGUMENTS
@@ -268,6 +309,12 @@ void B_PLUS_TREE_LEAF_PAGE_TYPE::ProcessTombstone() {
   // Get the index of the entry to delete (oldest tombstone)
   size_t delete_index = tombstones_[0];
 
+  std::cout << "[ProcessTombstone] Physically removing entry at index " << delete_index;
+  if (delete_index < static_cast<size_t>(GetSize())) {
+    std::cout << ", key=" << KeyAt(delete_index).GetAsInteger();
+  }
+  std::cout << "\n";
+
   // Actually delete the entry by shifting everything left
   for (int i = static_cast<int>(delete_index); i < GetSize() - 1; i++) {
     key_array_[i] = key_array_[i + 1];
@@ -288,14 +335,26 @@ void B_PLUS_TREE_LEAF_PAGE_TYPE::ProcessTombstone() {
     tombstones_[i] = tombstones_[i + 1];
   }
   num_tombstones_--;
+
+  // std::cout << "[ProcessTombstone] Done. Remaining tombstones=" << num_tombstones_
+  //           << ", active_size=" << GetActiveSize() << "\n";
 }
 
 FULL_INDEX_TEMPLATE_ARGUMENTS
 void B_PLUS_TREE_LEAF_PAGE_TYPE::AddTombstone(int index) {
-  BUSTUB_ASSERT(num_tombstones_ < LEAF_PAGE_TOMB_CNT, "Tombstone buffer full");
+  // If buffer is full, process the oldest tombstone first
+  if (num_tombstones_ >= LEAF_PAGE_TOMB_CNT) {
+    std::cout << "[AddTombstone] Buffer full, processing oldest tombstone\n";
+    ProcessTombstone();
+  }
+
+  BUSTUB_ASSERT(num_tombstones_ < LEAF_PAGE_TOMB_CNT, "Tombstone buffer full after processing");
   tombstones_[num_tombstones_] = index;
   num_tombstones_++;
-  std::cout << "[LEAF PAGE] added tombstone " << num_tombstones_;
+
+  // std::cout << "[AddTombstone] Added tombstone at index " << index
+  //           << ", total tombstones=" << num_tombstones_
+  //           << ", active_size=" << GetActiveSize() << "\n";
 }
 
 template class BPlusTreeLeafPage<GenericKey<4>, RID, GenericComparator<4>>;

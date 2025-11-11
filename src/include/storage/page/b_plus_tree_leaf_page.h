@@ -103,6 +103,7 @@ class BPlusTreeLeafPage : public BPlusTreePage {
   auto GetTombstoneAt(size_t index) const -> size_t;
 
   auto HasTombstones() const -> bool;
+  void ClearTombstoneForKey(const KeyType &key, const KeyComparator &comparator);
 
   auto AlreadyMarked(const KeyType &key, const KeyComparator &comparator_) const -> bool;
 

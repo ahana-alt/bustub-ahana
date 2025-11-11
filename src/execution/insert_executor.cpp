@@ -25,12 +25,20 @@ namespace bustub {
  */
 InsertExecutor::InsertExecutor(ExecutorContext *exec_ctx, const InsertPlanNode *plan,
                                std::unique_ptr<AbstractExecutor> &&child_executor)
-    : AbstractExecutor(exec_ctx) {
-  UNIMPLEMENTED("TODO(P3): Add implementation.");
-}
+    : AbstractExecutor(exec_ctx), plan_(plan), child_executor_(std::move(child_executor)), table_info_(nullptr) {}
 
 /** Initialize the insert */
-void InsertExecutor::Init() { UNIMPLEMENTED("TODO(P3): Add implementation."); }
+void InsertExecutor::Init() {
+  // Get the table metadata from the catalog
+  auto catalog = exec_ctx_->GetCatalog();
+  table_info_ = catalog->GetTable(plan_->GetTableOid());
+
+  // Initialize the child executor
+  child_executor_->Init();
+
+  // Reset the returned flag
+  returned_ = false;
+}
 
 /**
  * Yield the number of rows inserted into the table.
@@ -42,7 +50,64 @@ void InsertExecutor::Init() { UNIMPLEMENTED("TODO(P3): Add implementation."); }
  * NOTE: InsertExecutor::Next() returns true with number of inserted rows produced only once.
  */
 auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
-  UNIMPLEMENTED("TODO(P3): Add implementation.");
+  // Return false if we've already returned the result
+  if (returned_) {
+    return false;
+  }
+
+  // Get catalog to access indexes
+  auto catalog = exec_ctx_->GetCatalog();
+
+  // Get all indexes for this table
+  auto indexes = catalog->GetTableIndexes(table_info_->name_);
+
+  // Collect all tuples first
+  std::vector<Tuple> tuples_to_insert;
+
+  Tuple child_tuple;
+  RID child_rid;
+
+  while (child_executor_->Next(&child_tuple, &child_rid)) {
+    tuples_to_insert.push_back(child_tuple);
+  }
+
+  // Counter for inserted rows
+  int insert_count = 0;
+
+  // Now process all insertions
+  for (const auto &tuple_to_insert : tuples_to_insert) {
+    // Create tuple metadata (not deleted)
+    TupleMeta tuple_meta;
+    tuple_meta.is_deleted_ = false;
+
+    // Insert the tuple into the table
+    auto inserted_rid = table_info_->table_->InsertTuple(tuple_meta, tuple_to_insert);
+
+    // Check if insertion was successful
+    if (inserted_rid.has_value()) {
+      // Update all indexes for this table
+      for (const auto &index_info : indexes) {
+        // Extract the key from the inserted tuple
+        auto key_tuple = tuple_to_insert.KeyFromTuple(table_info_->schema_, index_info->key_schema_,
+                                                      index_info->index_->GetKeyAttrs());
+
+        // Insert the entry into the index
+        index_info->index_->InsertEntry(key_tuple, inserted_rid.value(), exec_ctx_->GetTransaction());
+      }
+
+      insert_count++;
+    }
+  }
+
+  // Create the output tuple with the count
+  std::vector<Value> values;
+  values.emplace_back(TypeId::INTEGER, insert_count);
+  *tuple = Tuple(values, &GetOutputSchema());
+
+  // Mark that we've returned the result
+  returned_ = true;
+
+  return true;
 }
 
 }  // namespace bustub

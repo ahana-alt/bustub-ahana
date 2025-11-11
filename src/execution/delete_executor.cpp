@@ -11,8 +11,9 @@
 //===----------------------------------------------------------------------===//
 
 #include <memory>
-#include "common/macros.h"
+#include <vector>
 
+#include "common/macros.h"
 #include "execution/executors/delete_executor.h"
 
 namespace bustub {
@@ -25,12 +26,20 @@ namespace bustub {
  */
 DeleteExecutor::DeleteExecutor(ExecutorContext *exec_ctx, const DeletePlanNode *plan,
                                std::unique_ptr<AbstractExecutor> &&child_executor)
-    : AbstractExecutor(exec_ctx) {
-  UNIMPLEMENTED("TODO(P3): Add implementation.");
-}
+    : AbstractExecutor(exec_ctx), plan_(plan), child_executor_(std::move(child_executor)), table_info_(nullptr) {}
 
 /** Initialize the delete */
-void DeleteExecutor::Init() { UNIMPLEMENTED("TODO(P3): Add implementation."); }
+void DeleteExecutor::Init() {
+  // Get table metadata from catalog
+  auto catalog = exec_ctx_->GetCatalog();
+  table_info_ = catalog->GetTable(plan_->GetTableOid());
+
+  // Initialize child executor
+  child_executor_->Init();
+
+  // Reset returned flag
+  returned_ = false;
+}
 
 /**
  * Yield the number of rows deleted from the table.
@@ -42,7 +51,62 @@ void DeleteExecutor::Init() { UNIMPLEMENTED("TODO(P3): Add implementation."); }
  * NOTE: DeleteExecutor::Next() returns true with the number of deleted rows produced only once.
  */
 auto DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
-  UNIMPLEMENTED("TODO(P3): Add implementation.");
+  // Return false if we've already returned the result
+  if (returned_) {
+    return false;
+  }
+
+  // Collect all tuples first to avoid deadlock
+  std::vector<std::pair<Tuple, RID>> tuples_to_delete;
+
+  Tuple child_tuple;
+  RID child_rid;
+
+  while (child_executor_->Next(&child_tuple, &child_rid)) {
+    tuples_to_delete.emplace_back(child_tuple, child_rid);
+  }
+
+  // CRITICAL: Destroy the child executor to release all latches
+  child_executor_.reset();
+
+  // Get catalog to access indexes
+  auto catalog = exec_ctx_->GetCatalog();
+
+  // Get all indexes for this table
+  auto indexes = catalog->GetTableIndexes(table_info_->name_);
+
+  // Counter for deleted rows
+  int delete_count = 0;
+
+  // Now process all deletions
+  for (const auto &[tuple_to_delete, rid_to_delete] : tuples_to_delete) {
+    // Mark the tuple as deleted
+    TupleMeta delete_meta;
+    delete_meta.is_deleted_ = true;
+    table_info_->table_->UpdateTupleMeta(delete_meta, rid_to_delete);
+
+    // Update all indexes for this table
+    for (const auto &index_info : indexes) {
+      // Extract the key from the deleted tuple
+      auto key_tuple = tuple_to_delete.KeyFromTuple(table_info_->schema_, index_info->key_schema_,
+                                                    index_info->index_->GetKeyAttrs());
+
+      // Delete the entry from the index
+      index_info->index_->DeleteEntry(key_tuple, rid_to_delete, exec_ctx_->GetTransaction());
+    }
+
+    delete_count++;
+  }
+
+  // Create the output tuple with the count
+  std::vector<Value> values;
+  values.emplace_back(TypeId::INTEGER, delete_count);
+  *tuple = Tuple(values, &GetOutputSchema());
+
+  // Mark that we've returned the result
+  returned_ = true;
+
+  return true;
 }
 
 }  // namespace bustub

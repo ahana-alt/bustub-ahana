@@ -79,7 +79,7 @@ BufferPoolManager::BufferPoolManager(size_t num_frames, DiskManager *disk_manage
       disk_scheduler_(std::make_shared<DiskScheduler>(disk_manager)),
       log_manager_(log_manager) {
   // Not strictly necessary...
-  std::cout << "[BufferPoolManager::Constructor] Acquiring bpm_latch_" << std::endl;
+  // std::cout << "[BufferPoolManager::Constructor] Acquiring bpm_latch_" << std::endl;
   std::scoped_lock latch(*bpm_latch_);
 
   // Initialize the monotonically increasing counter at 0.
@@ -149,7 +149,7 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
   std::shared_ptr<FrameHeader> fh;
   frame_id_t fid;
 
-  std::cout << "[DeletePage] Acquiring bpm_latch_ (unique)" << std::endl;
+  // std::cout << "[DeletePage] Acquiring bpm_latch_ (unique)" << std::endl;
   std::unique_lock lk(*bpm_latch_);
 
   auto it = page_table_.find(page_id);
@@ -173,7 +173,7 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
 
   // std::cout << "[DeletePage] Acquiring frame rwlatch_ (exclusive)" << std::endl;
   // fh->rwlatch_.lock();
-  std::cout << "[DeletePage] Releasing bpm_latch_" << std::endl;
+  // std::cout << "[DeletePage] Releasing bpm_latch_" << std::endl;
   lk.unlock();
   disk_scheduler_->DeallocatePage(page_id);
   return true;
@@ -221,12 +221,12 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
 // ========================= CheckedWritePage =========================
 auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_type) -> std::optional<WritePageGuard> {
   std::cout << page_id << std::endl;
-  std::cout << "[CheckedWritePage] Acquiring bpm_latch_ (unique)" << std::endl;
+  // std::cout << "[CheckedWritePage] Acquiring bpm_latch_ (unique)" << std::endl;
   std::unique_lock<std::mutex> lk(*bpm_latch_);
 
   // Case 1: Page already exists in buffer pool
   if (auto it = page_table_.find(page_id); it != page_table_.end()) {
-    std::cout << "case1" << std::endl;
+    // std::cout << "case1" << std::endl;
     const frame_id_t fid = it->second;
     auto frame = frames_[fid];
 
@@ -237,18 +237,18 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
     // This ensures atomicity with SetEvictable
     frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
 
-    // Release bpm_latch_ BEFORE acquiring frame lock to avoid deadlock
-    lk.unlock();
-    std::cout << "releasing bpm latch" << std::endl;
+    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
-    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_, false};
+    // Release bpm_latch_ BEFORE acquiring frame lock to avoid deadlock
+    // lk.unlock();
+    // std::cout << "releasing bpm latch" << std::endl;
 
     return guard;
   }
 
   // Case 2: Free frame available
   if (!free_frames_.empty()) {
-    std::cout << "case2" << std::endl;
+    // std::cout << "case2" << std::endl;
     const frame_id_t fid = free_frames_.front();
     free_frames_.pop_front();
     auto frame = frames_[fid];
@@ -259,9 +259,9 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
     replacer_->RecordAccess(fid, page_id, access_type);
     replacer_->SetEvictable(fid, false);
 
-    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_, true};
+    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
 
-    lk.unlock();
+    // lk.unlock();
 
     std::promise<bool> p;
     auto f = p.get_future();
@@ -277,7 +277,7 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
   auto victim_opt = replacer_->Evict();
 
   if (!victim_opt) {
-    std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_ (no victim)" << std::endl;
+    // std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_ (no victim)" << std::endl;
     lk.unlock();
     return std::nullopt;
   }
@@ -295,16 +295,16 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
 
   bool was_dirty = frame->is_dirty_;
   page_table_.erase(pid);
-  page_table_[page_id] = victim;
+  // page_table_[page_id] = victim;
 
   replacer_->RecordAccess(victim, page_id, access_type);
   replacer_->SetEvictable(victim, false);
 
   // Acquire lock, let guard increment pin count
-  WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_, true};
+  WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
 
-  std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_" << std::endl;
-  lk.unlock();
+  // std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_" << std::endl;
+  // lk.unlock();
 
   if (was_dirty) {
     std::promise<bool> flush_p;
@@ -323,6 +323,11 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
   reqs.emplace_back(DiskRequest{false, frame->GetDataMut(), page_id, std::move(p)});
   disk_scheduler_->Schedule(reqs);
   f.get();
+
+  {
+    std::scoped_lock lk2(*bpm_latch_);
+    page_table_[page_id] = victim;
+  }
 
   return guard;
 }
@@ -353,7 +358,7 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
  */
 // ========================= CheckedReadPage =========================
 auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_type) -> std::optional<ReadPageGuard> {
-  std::cout << "[CheckedReadPage] Acquiring bpm_latch_ (unique)" << std::endl;
+  // std::cout << "[CheckedReadPage] Acquiring bpm_latch_ (unique)" << std::endl;
   std::unique_lock<std::mutex> lk(*bpm_latch_);
 
   // Case 1: Page already exists in buffer pool
@@ -364,14 +369,16 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
     replacer_->RecordAccess(fid, page_id, access_type);
     replacer_->SetEvictable(fid, false);
 
-    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+    frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
+
+    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
     // CRITICAL: Increment pin count WHILE holding bpm_latch_
     // This ensures atomicity with SetEvictable
     // frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
 
-    std::cout << "[CheckedReadPage-Case1] Releasing bpm_latch_" << std::endl;
-    lk.unlock();
+    // std::cout << "[CheckedReadPage-Case1] Releasing bpm_latch_" << std::endl;
+    // lk.unlock();
 
     // Now acquire lock, skip pin increment (already done above)
 
@@ -390,10 +397,10 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
     replacer_->RecordAccess(fid, page_id, access_type);
     replacer_->SetEvictable(fid, false);
 
-    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, disk_scheduler_};
+    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
 
-    std::cout << "[CheckedReadPage-Case2] Releasing bpm_latch_" << std::endl;
-    lk.unlock();
+    // std::cout << "[CheckedReadPage-Case2] Releasing bpm_latch_" << std::endl;
+    // lk.unlock();
 
     // Acquire lock, let guard increment pin count
 
@@ -411,7 +418,7 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
   auto victim_opt = replacer_->Evict();
 
   if (!victim_opt) {
-    std::cout << "[CheckedReadPage-Case3] Releasing bpm_latch_ (no victim)" << std::endl;
+    // std::cout << "[CheckedReadPage-Case3] Releasing bpm_latch_ (no victim)" << std::endl;
     lk.unlock();
     return std::nullopt;
   }
@@ -430,15 +437,15 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
   bool was_dirty = fh->is_dirty_;
 
   page_table_.erase(old_pid);
-  page_table_[page_id] = victim;
+  // page_table_[page_id] = victim;
 
   replacer_->RecordAccess(victim, page_id, access_type);
   replacer_->SetEvictable(victim, false);
 
-  ReadPageGuard guard{page_id, fh, replacer_, bpm_latch_, disk_scheduler_};
+  ReadPageGuard guard{page_id, fh, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
 
-  std::cout << "[CheckedReadPage-Case3] Releasing bpm_latch_" << std::endl;
-  lk.unlock();
+  // std::cout << "[CheckedReadPage-Case3] Releasing bpm_latch_" << std::endl;
+  // lk.unlock();
 
   if (was_dirty) {
     std::promise<bool> flush_p;
@@ -457,6 +464,11 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
   reqs.emplace_back(DiskRequest{false, fh->GetDataMut(), page_id, std::move(p)});
   disk_scheduler_->Schedule(reqs);
   f.get();
+
+  {
+    std::scoped_lock lk2(*bpm_latch_);
+    page_table_[page_id] = victim;
+  }
 
   return guard;
 }
@@ -576,7 +588,7 @@ auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
   std::shared_ptr<FrameHeader> fh;
 
   {
-    std::cout << "[FlushPage] Acquiring bpm_latch_ (scoped)" << std::endl;
+    // std::cout << "[FlushPage] Acquiring bpm_latch_ (scoped)" << std::endl;
     std::scoped_lock lk(*bpm_latch_);
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) {
@@ -589,7 +601,7 @@ auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
     return true;
   }
 
-  std::cout << "[FlushPage] Acquiring frame rwlatch_ (exclusive)" << std::endl;
+  // std::cout << "[FlushPage] Acquiring frame rwlatch_ (exclusive)" << std::endl;
   std::unique_lock<std::shared_mutex> wl(fh->rwlatch_);
 
   std::promise<bool> p;
@@ -644,7 +656,7 @@ void BufferPoolManager::FlushAllPagesUnsafe() {
 void BufferPoolManager::FlushAllPages() {
   std::vector<page_id_t> pids;
   {
-    std::cout << "[FlushAllPages] Acquiring bpm_latch_ (scoped)" << std::endl;
+    // std::cout << "[FlushAllPages] Acquiring bpm_latch_ (scoped)" << std::endl;
     std::scoped_lock lk(*bpm_latch_);
     pids.reserve(page_table_.size());
     for (const auto &kv : page_table_) {
@@ -681,7 +693,7 @@ void BufferPoolManager::FlushAllPages() {
  * @return std::optional<size_t> The pin count if the page exists; otherwise, `std::nullopt`.
  */
 auto BufferPoolManager::GetPinCount(page_id_t page_id) -> std::optional<size_t> {
-  std::cout << "[GetPinCount] Acquiring bpm_latch_ (scoped)" << std::endl;
+  // std::cout << "[GetPinCount] Acquiring bpm_latch_ (scoped)" << std::endl;
   std::scoped_lock lk(*bpm_latch_);
   auto it = page_table_.find(page_id);
   if (it == page_table_.end()) {

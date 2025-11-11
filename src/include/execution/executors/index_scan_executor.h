@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #pragma once
-
+#include <memory>
 #include "common/rid.h"
 #include "execution/executor_context.h"
 #include "execution/executors/abstract_executor.h"
@@ -28,6 +28,11 @@ class IndexScanExecutor : public AbstractExecutor {
  public:
   IndexScanExecutor(ExecutorContext *exec_ctx, const IndexScanPlanNode *plan);
 
+  ~IndexScanExecutor() override {
+    // Explicitly destroy iterator to release any held resources
+    index_iterator_.reset();
+  }
+
   auto GetOutputSchema() const -> const Schema & override { return plan_->OutputSchema(); }
 
   void Init() override;
@@ -37,5 +42,17 @@ class IndexScanExecutor : public AbstractExecutor {
  private:
   /** The index scan plan node to be executed. */
   const IndexScanPlanNode *plan_;
+
+  /** Table information */
+  std::shared_ptr<TableInfo> table_info_;
+
+  /** Index information */
+  std::shared_ptr<IndexInfo> index_info_;
+
+  /** B+ tree index */
+  BPlusTreeIndexForTwoIntegerColumn *tree_{nullptr};
+
+  /** Index iterator for ordered scan */
+  std::unique_ptr<BPlusTreeIndexIteratorForTwoIntegerColumn> index_iterator_;
 };
 }  // namespace bustub

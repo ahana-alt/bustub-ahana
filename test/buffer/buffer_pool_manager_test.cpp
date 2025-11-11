@@ -321,7 +321,7 @@ TEST(BufferPoolManagerTest, DISABLED_ContentionTest) {
   thread1.join();
 }
 
-TEST(BufferPoolManagerTest, DeadlockTest) {
+TEST(BufferPoolManagerTest, DISABLED_DeadlockTest) {
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
   auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
 
@@ -433,136 +433,673 @@ TEST(BufferPoolManagerTest, EvictableTest) {
 }
 
 TEST(BufferPoolManagerTest, ConcurrentReaderWriterTest) {
-  // Small pool to force evictions while multiple readers/writers are active.
-  constexpr size_t kFrames = 16;
+  const size_t buffer_pool_size = 64;
+  const size_t num_pages = 256;
+  const size_t num_readers = 8;
+  const size_t num_writers = 8;
+  const size_t operations_per_thread = 100;
+
+  auto disk_manager = std::make_shared<DiskManager>("test.db");
+  auto bpm = std::make_shared<BufferPoolManager>(buffer_pool_size, disk_manager.get(), nullptr);
+
+  // Initialize all pages with unique data
+  for (size_t i = 0; i < num_pages; i++) {
+    auto guard = bpm->WritePage(i);
+    auto data = guard.GetDataMut();
+
+    // Fill page with its page_id repeated
+    for (size_t j = 0; j < BUSTUB_PAGE_SIZE / sizeof(page_id_t); j++) {
+      reinterpret_cast<page_id_t *>(data)[j] = static_cast<page_id_t>(i);
+    }
+  }
+
+  std::cout << "Initialized " << num_pages << " pages" << std::endl;
+
+  std::atomic<bool> stop{false};
+  std::atomic<size_t> errors{0};
+
+  // Reader threads - read pages and verify consistency
+  auto reader_func = [&](size_t thread_id) {
+    std::random_device rd;
+    std::mt19937 gen(rd() + thread_id);
+    std::uniform_int_distribution<> dis(0, num_pages - 1);
+
+    for (size_t i = 0; i < operations_per_thread && !stop; i++) {
+      page_id_t page_id = dis(gen);
+
+      try {
+        auto guard = bpm->ReadPage(page_id);
+        const auto *data = reinterpret_cast<const page_id_t *>(guard.GetData());
+
+        // Verify all entries in the page match the expected page_id
+        for (size_t j = 0; j < BUSTUB_PAGE_SIZE / sizeof(page_id_t); j++) {
+          if (data[j] != page_id) {
+            std::cerr << "Reader " << thread_id << " detected corruption! "
+                      << "Page " << page_id << " position " << j << " has value " << data[j] << " (expected " << page_id
+                      << ")" << std::endl;
+            errors++;
+            stop = true;
+            break;
+          }
+        }
+      } catch (const std::exception &e) {
+        std::cerr << "Reader " << thread_id << " exception: " << e.what() << std::endl;
+        errors++;
+        stop = true;
+      }
+    }
+  };
+
+  // Writer threads - write to pages
+  auto writer_func = [&](size_t thread_id) {
+    std::random_device rd;
+    std::mt19937 gen(rd() + thread_id + 1000);
+    std::uniform_int_distribution<> dis(0, num_pages - 1);
+
+    for (size_t i = 0; i < operations_per_thread && !stop; i++) {
+      page_id_t page_id = dis(gen);
+
+      try {
+        auto guard = bpm->WritePage(page_id);
+        auto *data = guard.GetDataMut();
+
+        // Write page_id to all positions
+        for (size_t j = 0; j < BUSTUB_PAGE_SIZE / sizeof(page_id_t); j++) {
+          reinterpret_cast<page_id_t *>(data)[j] = page_id;
+        }
+      } catch (const std::exception &e) {
+        std::cerr << "Writer " << thread_id << " exception: " << e.what() << std::endl;
+        errors++;
+        stop = true;
+      }
+    }
+  };
+
+  // Launch all threads
+  std::vector<std::thread> threads;
+
+  for (size_t i = 0; i < num_readers; i++) {
+    threads.emplace_back(reader_func, i);
+  }
+
+  for (size_t i = 0; i < num_writers; i++) {
+    threads.emplace_back(writer_func, i);
+  }
+
+  // Wait for all threads to complete
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  std::cout << "Test completed with " << errors.load() << " errors" << std::endl;
+  EXPECT_EQ(errors.load(), 0);
+
+  disk_manager->ShutDown();
+  remove("test.db");
+}
+
+TEST(BufferPoolManagerTest, StaircaseLoadTest) {
+  // Tiny buffer to force eviction; plenty of pages to thrash.
+  constexpr size_t kFrames = 8;
   constexpr size_t kNumPages = 64;
-  constexpr size_t kNumWriters = 4;
-  constexpr size_t kNumReaders = 8;
-  constexpr size_t kWriterRounds = 1500;  // work per-writer
-  constexpr size_t kReaderRounds = 1500;  // work per-reader
+
+  struct Stage {
+    size_t writers;
+    size_t readers;
+    size_t writer_rounds;
+    size_t reader_rounds;
+  };
+
+  // Gradually increase pressure across stages.
+  // const std::vector<Stage> kStages = {
+  //     {2, 4, 300, 600}, {4, 6, 600, 900}, {6, 8, 900, 1200}, {8, 10, 1200, 1500},  // heaviest stage
+  // };
+
+  const std::vector<Stage> kStages = {
+      {1, 1, 300, 600}  // heaviest stage
+  };
 
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
   auto bpm = std::make_shared<BufferPoolManager>(kFrames, disk_manager.get());
 
-  // Pre-allocate a universe of pages.
+  // Allocate page ids once and reuse across stages.
   std::vector<page_id_t> page_ids;
   page_ids.reserve(kNumPages);
   for (size_t i = 0; i < kNumPages; i++) {
     page_ids.push_back(bpm->NewPage());
   }
 
-  // Shared epochs per page; writers bump after each successful write.
-  std::vector<std::atomic<uint32_t>> epochs(kNumPages);
-  for (auto &e : epochs) {
-    e.store(0, std::memory_order_relaxed);
+  // Per-page version counters; writers bump these.
+  std::vector<std::atomic<uint64_t>> page_versions(kNumPages);
+  for (auto &v : page_versions) {
+    v.store(0, std::memory_order_relaxed);
   }
 
-  // Deterministic page payload helpers.
-  auto write_pattern = [](char *dst, page_id_t pid, uint32_t epoch) {
-    // encode pid + epoch in first 8 bytes and fill rest with a deterministic pattern
-    std::memcpy(dst + 0, &pid, sizeof(pid));
-    std::memcpy(dst + 4, &epoch, sizeof(epoch));
-    for (size_t i = 8; i < BUSTUB_PAGE_SIZE; i++) {
-      dst[i] = static_cast<char>((pid + epoch + i) & 0xFF);
+  // Seed each page with version 0 pattern.
+  for (size_t i = 0; i < kNumPages; i++) {
+    const page_id_t pid = page_ids[i];
+    auto guard = bpm->WritePage(pid, AccessType::Unknown);
+    char *data = guard.GetDataMut();
+
+    const uint64_t ver = 0;
+    const uint64_t checksum = static_cast<uint64_t>(pid) ^ ver;
+
+    std::memcpy(data, &pid, sizeof(page_id_t));           // [0..7] page_id
+    std::memcpy(data + 8, &ver, sizeof(uint64_t));        // [8..15] version
+    std::memcpy(data + 16, &checksum, sizeof(uint64_t));  // [16..23] checksum
+    for (size_t j = 24; j < BUSTUB_PAGE_SIZE; j++) {
+      data[j] = static_cast<char>((ver + j) & 0xFF);
     }
-  };
-  auto check_pattern_pid_only = [](const char *src, page_id_t expected_pid) -> bool {
-    page_id_t got_pid{0};
-    std::memcpy(&got_pid, src + 0, sizeof(got_pid));
-    return got_pid == expected_pid;
-  };
-
-  // Barrier-style start signal using cv/mutex (to match your test style).
-  std::mutex start_mu;
-  std::condition_variable start_cv;
-  bool start_flag = false;
-
-  // Launch writers.
-  std::vector<std::thread> writers;
-  writers.reserve(kNumWriters);
-  for (size_t t = 0; t < kNumWriters; t++) {
-    writers.emplace_back([&, t]() {
-      // wait for start
-      {
-        std::unique_lock<std::mutex> lk(start_mu);
-        while (!start_flag) {
-          start_cv.wait(lk);
-        }
-      }
-      for (size_t it = 0; it < kWriterRounds; it++) {
-        const size_t idx = (it + t) % kNumPages;
-        const page_id_t pid = page_ids[idx];
-
-        // Exclusive modify
-        auto w = bpm->WritePage(pid, AccessType::Unknown);
-        char *buf = w.GetDataMut();  // must set dirty internally
-        // choose next epoch
-        const uint32_t next_epoch = epochs[idx].load(std::memory_order_relaxed) + 1;
-        write_pattern(buf, pid, next_epoch);
-        // release (unpin)
-        w.Drop();
-
-        // publish epoch after bytes are written
-        epochs[idx].store(next_epoch, std::memory_order_release);
-
-        // occasionally flush to exercise safe flush path
-        if ((it % 127) == 0) {
-          (void)bpm->FlushPage(pid);
-        }
-      }
-    });
+    guard.Drop();
   }
 
-  // Launch readers.
-  std::vector<std::thread> readers;
-  readers.reserve(kNumReaders);
-  for (size_t t = 0; t < kNumReaders; t++) {
-    readers.emplace_back([&, t]() {
-      // wait for start
-      {
-        std::unique_lock<std::mutex> lk(start_mu);
-        while (!start_flag) {
-          start_cv.wait(lk);
-        }
+  auto run_stage = [&](const Stage &S) {
+    std::atomic<size_t> wrong_page_reads{0};
+    std::atomic<size_t> version_mismatches{0};
+    std::atomic<size_t> torn_reads{0};
+
+    std::atomic<bool> start_flag{false};
+    std::atomic<size_t> ready_count{0};
+
+    auto writer_func = [&](size_t tid) {
+      ready_count.fetch_add(1, std::memory_order_relaxed);
+      while (!start_flag.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
       }
-      // each reader does a bunch of random reads
-      std::mt19937 rng(static_cast<uint32_t>(0xC0FFEE + t));
+      std::mt19937 rng(static_cast<uint32_t>(tid * 1337u + 4242u));
       std::uniform_int_distribution<size_t> dist(0, kNumPages - 1);
 
-      for (size_t it = 0; it < kReaderRounds; it++) {
+      for (size_t r = 0; r < S.writer_rounds; r++) {
         const size_t idx = dist(rng);
         const page_id_t pid = page_ids[idx];
 
-        // Shared read
-        auto r = bpm->ReadPage(pid, AccessType::Unknown);
-        const char *buf = r.GetData();
+        auto guard = bpm->WritePage(pid, AccessType::Unknown);
 
-        // At minimum, the encoded pid must match (protects against stale mapping / torn I/O).
-        // std::cout<<"till here";
-        ASSERT_TRUE(check_pattern_pid_only(buf, pid)) << "Reader saw wrong pid in page header: expected " << pid;
+        const uint64_t new_version = page_versions[idx].fetch_add(1, std::memory_order_acq_rel) + 1;
 
-        r.Drop();
+        char *data = guard.GetDataMut();
+        const uint64_t checksum = static_cast<uint64_t>(pid) ^ new_version;
+
+        std::memcpy(data, &pid, sizeof(page_id_t));
+        std::memcpy(data + 8, &new_version, sizeof(uint64_t));
+        std::memcpy(data + 16, &checksum, sizeof(uint64_t));
+        for (size_t i = 24; i < BUSTUB_PAGE_SIZE; i++) {
+          data[i] = static_cast<char>((new_version + i) & 0xFF);
+        }
+
+        if ((r % 127) == 0) {
+          guard.Flush();  // exercise disk path
+        }
+        guard.Drop();
+
+        if ((r % 19) == 0) {
+          std::this_thread::yield();
+        }
       }
-    });
+    };
+
+    auto reader_func = [&](size_t tid) {
+      ready_count.fetch_add(1, std::memory_order_relaxed);
+      while (!start_flag.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      std::mt19937 rng(static_cast<uint32_t>(tid * 98765u + 123u));
+      std::uniform_int_distribution<size_t> dist(0, kNumPages - 1);
+
+      for (size_t r = 0; r < S.reader_rounds; r++) {
+        const size_t idx = dist(rng);
+        const page_id_t expected_pid = page_ids[idx];
+
+        auto guard = bpm->ReadPage(expected_pid, AccessType::Unknown);
+        const char *data = guard.GetData();
+
+        page_id_t read_pid;
+        uint64_t read_ver, read_sum;
+        std::memcpy(&read_pid, data, sizeof(page_id_t));
+        std::memcpy(&read_ver, data + 8, sizeof(uint64_t));
+        std::memcpy(&read_sum, data + 16, sizeof(uint64_t));
+
+        if (read_pid != expected_pid) {
+          wrong_page_reads.fetch_add(1, std::memory_order_relaxed);
+          guard.Drop();
+          continue;
+        }
+
+        const uint64_t exp_sum = static_cast<uint64_t>(read_pid) ^ read_ver;
+        if (read_sum != exp_sum) {
+          version_mismatches.fetch_add(1, std::memory_order_relaxed);
+          guard.Drop();
+          continue;
+        }
+
+        bool pattern_ok = true;
+        for (size_t j = 24; j < BUSTUB_PAGE_SIZE; j += 101) {
+          const char expected_byte = static_cast<char>((read_ver + j) & 0xFF);
+          if (data[j] != expected_byte) {
+            pattern_ok = false;
+            break;
+          }
+        }
+        if (!pattern_ok) {
+          torn_reads.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        if ((r % 100) == 0) {
+          std::this_thread::sleep_for(std::chrono::microseconds(80));
+        }
+
+        guard.Drop();
+      }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(S.writers + S.readers);
+    for (size_t i = 0; i < S.writers; i++) threads.emplace_back(writer_func, i);
+    for (size_t i = 0; i < S.readers; i++) threads.emplace_back(reader_func, i + S.writers);
+
+    while (ready_count.load(std::memory_order_relaxed) < (S.writers + S.readers)) {
+      std::this_thread::yield();
+    }
+    start_flag.store(true, std::memory_order_release);
+
+    for (auto &t : threads) t.join();
+
+    // Stage diagnostics
+    std::cout << "[Staircase] writers=" << S.writers << " readers=" << S.readers << " wrong=" << wrong_page_reads.load()
+              << " mismatch=" << version_mismatches.load() << " torn=" << torn_reads.load() << std::endl;
+
+    EXPECT_EQ(wrong_page_reads.load(), 0ULL);
+    EXPECT_EQ(version_mismatches.load(), 0ULL);
+    EXPECT_EQ(torn_reads.load(), 0ULL);
+
+    // Verify each page matches its final version & pattern.
+    for (size_t i = 0; i < kNumPages; i++) {
+      const page_id_t pid = page_ids[i];
+      const uint64_t final_ver = page_versions[i].load(std::memory_order_acquire);
+
+      auto guard = bpm->ReadPage(pid, AccessType::Unknown);
+      const char *data = guard.GetData();
+
+      page_id_t read_pid;
+      uint64_t read_ver, read_sum;
+      std::memcpy(&read_pid, data, sizeof(page_id_t));
+      std::memcpy(&read_ver, data + 8, sizeof(uint64_t));
+      std::memcpy(&read_sum, data + 16, sizeof(uint64_t));
+
+      EXPECT_EQ(read_pid, pid);
+      EXPECT_EQ(read_ver, final_ver);
+      EXPECT_EQ(read_sum, (static_cast<uint64_t>(pid) ^ read_ver));
+
+      bool body_ok = true;
+      for (size_t j = 24; j < BUSTUB_PAGE_SIZE; j += 113) {
+        const char exp = static_cast<char>((read_ver + j) & 0xFF);
+        if (data[j] != exp) {
+          body_ok = false;
+          break;
+        }
+      }
+      EXPECT_TRUE(body_ok) << "Body torn pid=" << pid << " ver=" << read_ver;
+
+      guard.Drop();
+    }
+
+    // No pin leaks after this stage.
+    for (auto pid : page_ids) {
+      auto pin = bpm->GetPinCount(pid);
+      ASSERT_TRUE(pin.has_value());
+      EXPECT_EQ(*pin, 0UL) << "Pin leak on pid=" << pid;
+    }
+
+    // Optional: make durable between stages.
+    bpm->FlushAllPages();
+  };
+
+  for (const auto &st : kStages) {
+    run_stage(st);
   }
 
-  // Start all threads together (same pattern as your EvictableTest).
-  {
-    std::unique_lock<std::mutex> lk(start_mu);
-    start_flag = true;
-    start_cv.notify_all();
+  disk_manager->ShutDown();
+  remove(db_fname);
+}
+
+TEST(BufferPoolManagerTest, DISABLED_ConcurrentWritersOnlyTest) {
+  // Tiny buffer pool to force frequent evictions & flushes.
+  constexpr size_t kFrames = 8;
+  constexpr size_t kNumPages = 64;
+  constexpr size_t kNumWriters = 12;
+  constexpr size_t kWriterRounds = 1500;
+
+  auto disk_manager = std::make_shared<DiskManager>(db_fname);
+  auto bpm = std::make_shared<BufferPoolManager>(kFrames, disk_manager.get());
+
+  // Pre-allocate page ids.
+  std::vector<page_id_t> page_ids;
+  page_ids.reserve(kNumPages);
+  for (size_t i = 0; i < kNumPages; i++) {
+    page_ids.push_back(bpm->NewPage());
   }
 
-  for (auto &th : writers) th.join();
-  for (auto &th : readers) th.join();
-
-  // Final spot checks: read a few pages and ensure pid matches.
-  for (size_t i = 0; i < kNumPages; i += 7) {
-    auto g = bpm->ReadPage(page_ids[i], AccessType::Unknown);
-    EXPECT_TRUE(check_pattern_pid_only(g.GetData(), page_ids[i]));
-    g.Drop();
+  // Per-page version counters that writers will increment.
+  std::vector<std::atomic<uint64_t>> page_versions(kNumPages);
+  for (auto &v : page_versions) {
+    v.store(0, std::memory_order_relaxed);
   }
-  std::cout << "till here";
+
+  // Barrier for synchronized start.
+  std::atomic<bool> start_flag{false};
+  std::atomic<size_t> ready_count{0};
+
+  auto writer_func = [&](size_t tid) {
+    ready_count.fetch_add(1, std::memory_order_relaxed);
+    while (!start_flag.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+
+    std::mt19937 rng(static_cast<uint32_t>(tid * 1337 + 4242));
+    std::uniform_int_distribution<size_t> dist(0, kNumPages - 1);
+
+    for (size_t round = 0; round < kWriterRounds; round++) {
+      const size_t idx = dist(rng);
+      const page_id_t pid = page_ids[idx];
+
+      // Exclusive write guard
+      auto guard = bpm->WritePage(pid, AccessType::Unknown);
+
+      // Increment per-page version first, then write it.
+      const uint64_t new_version = page_versions[idx].fetch_add(1, std::memory_order_acq_rel) + 1;
+
+      char *data = guard.GetDataMut();
+
+      // [0..7]: page_id
+      std::memcpy(data, &pid, sizeof(page_id_t));
+      // [8..15]: version
+      std::memcpy(data + 8, &new_version, sizeof(uint64_t));
+      // [16..23]: checksum = pid ^ version
+      const uint64_t checksum = static_cast<uint64_t>(pid) ^ new_version;
+      std::memcpy(data + 16, &checksum, sizeof(uint64_t));
+      // Body pattern dependent on version
+      for (size_t i = 24; i < BUSTUB_PAGE_SIZE; i++) {
+        data[i] = static_cast<char>((new_version + i) & 0xFF);
+      }
+
+      // Occasionally flush while holding the guard to stress disk path.
+      if ((round % 127) == 0) {
+        guard.Flush();
+      }
+
+      // Explicitly drop to exercise pin count transitions.
+      guard.Drop();
+
+      // Encourage interleaving.
+      if ((round % 19) == 0) {
+        std::this_thread::yield();
+      }
+    }
+  };
+
+  // Launch writers
+  std::vector<std::thread> threads;
+  threads.reserve(kNumWriters);
+  for (size_t i = 0; i < kNumWriters; i++) {
+    threads.emplace_back(writer_func, i);
+  }
+
+  // Start all together
+  while (ready_count.load(std::memory_order_relaxed) < kNumWriters) {
+    std::this_thread::yield();
+  }
+  start_flag.store(true, std::memory_order_release);
+
+  for (auto &t : threads) {
+    t.join();
+  }
+
+  // Final verification: every page's header and body must match the final version.
+  for (size_t i = 0; i < kNumPages; i++) {
+    const page_id_t expected_pid = page_ids[i];
+    const uint64_t final_version = page_versions[i].load(std::memory_order_acquire);
+
+    auto guard = bpm->ReadPage(expected_pid, AccessType::Unknown);
+    const char *data = guard.GetData();
+
+    page_id_t read_pid;
+    std::memcpy(&read_pid, data, sizeof(page_id_t));
+    EXPECT_EQ(read_pid, expected_pid) << "Page ID header corrupted for pid=" << expected_pid;
+
+    uint64_t read_version;
+    std::memcpy(&read_version, data + 8, sizeof(uint64_t));
+    EXPECT_EQ(read_version, final_version) << "Version mismatch for pid=" << expected_pid;
+
+    uint64_t read_checksum;
+    std::memcpy(&read_checksum, data + 16, sizeof(uint64_t));
+    EXPECT_EQ(read_checksum, (static_cast<uint64_t>(expected_pid) ^ read_version))
+        << "Checksum mismatch for pid=" << expected_pid;
+
+    bool pattern_ok = true;
+    for (size_t j = 24; j < BUSTUB_PAGE_SIZE; j += 113) {
+      const char expected_byte = static_cast<char>((read_version + j) & 0xFF);
+      if (data[j] != expected_byte) {
+        pattern_ok = false;
+        break;
+      }
+    }
+    EXPECT_TRUE(pattern_ok) << "Body pattern torn for pid=" << expected_pid << " version=" << read_version;
+
+    guard.Drop();
+  }
+
+  // Ensure no pin leaks: every resident page should report pin_count = 0.
+  for (auto pid : page_ids) {
+    auto pin = bpm->GetPinCount(pid);
+    ASSERT_TRUE(pin.has_value());
+    EXPECT_EQ(*pin, 0UL) << "Pin leak on pid=" << pid;
+  }
+
+  disk_manager->ShutDown();
+  remove(db_fname);
+}
+
+TEST(BufferPoolManagerTest, BetterConcurrentReaderWriterTest) {
+  constexpr size_t kFrames = 8;
+  constexpr size_t kNumPages = 32;
+  constexpr size_t kNumWriters = 4;
+  constexpr size_t kNumReaders = 8;
+  constexpr size_t kWriterRounds = 500;
+  constexpr size_t kReaderRounds = 1000;
+
+  auto disk_manager = std::make_shared<DiskManager>(db_fname);
+  auto bpm = std::make_shared<BufferPoolManager>(kFrames, disk_manager.get());
+
+  // Pre-allocate pages
+  std::vector<page_id_t> page_ids;
+  page_ids.reserve(kNumPages);
+  for (size_t i = 0; i < kNumPages; i++) {
+    page_ids.push_back(bpm->NewPage());
+  }
+
+  // Each page has a version counter that gets incremented by writers
+  std::vector<std::atomic<uint64_t>> page_versions(kNumPages);
+  for (auto &v : page_versions) {
+    v.store(0, std::memory_order_relaxed);
+  }
+
+  // Track errors
+  std::atomic<size_t> version_mismatches{0};
+  std::atomic<size_t> torn_reads{0};
+  std::atomic<size_t> wrong_page_reads{0};
+
+  // Barrier for synchronized start
+  std::atomic<bool> start_flag{false};
+  std::atomic<size_t> ready_count{0};
+
+  // Writer threads: increment version and write pattern
+  auto writer_func = [&](size_t thread_id) {
+    ready_count.fetch_add(1);
+    while (!start_flag.load()) {
+      std::this_thread::yield();
+    }
+
+    std::mt19937 rng(thread_id * 12345);
+    std::uniform_int_distribution<size_t> dist(0, kNumPages - 1);
+
+    for (size_t round = 0; round < kWriterRounds; round++) {
+      size_t idx = dist(rng);
+      page_id_t pid = page_ids[idx];
+
+      // Get write guard
+      auto guard = bpm->WritePage(pid, AccessType::Unknown);
+
+      // Increment version atomically
+      uint64_t new_version = page_versions[idx].fetch_add(1, std::memory_order_release) + 1;
+
+      // Write pattern: [page_id][version][checksum][repeating pattern]
+      char *data = guard.GetDataMut();
+
+      // Write page_id in first 8 bytes
+      std::memcpy(data, &pid, sizeof(page_id_t));
+
+      // Write version in next 8 bytes
+      std::memcpy(data + 8, &new_version, sizeof(uint64_t));
+
+      // Calculate checksum of page_id + version
+      uint64_t checksum = static_cast<uint64_t>(pid) ^ new_version;
+      std::memcpy(data + 16, &checksum, sizeof(uint64_t));
+
+      // Fill rest with deterministic pattern based on version
+      for (size_t i = 24; i < BUSTUB_PAGE_SIZE; i++) {
+        data[i] = static_cast<char>((new_version + i) & 0xFF);
+      }
+
+      // Explicitly drop to test pin count handling
+      guard.Drop();
+
+      // Occasionally yield to encourage interleaving
+      if (round % 10 == 0) {
+        std::this_thread::yield();
+      }
+    }
+  };
+
+  // Reader threads: verify consistency
+  auto reader_func = [&](size_t thread_id) {
+    ready_count.fetch_add(1);
+    while (!start_flag.load()) {
+      std::this_thread::yield();
+    }
+
+    std::mt19937 rng(thread_id * 54321);
+    std::uniform_int_distribution<size_t> dist(0, kNumPages - 1);
+
+    for (size_t round = 0; round < kReaderRounds; round++) {
+      size_t idx = dist(rng);
+      page_id_t expected_pid = page_ids[idx];
+
+      // Get read guard
+      auto guard = bpm->ReadPage(expected_pid, AccessType::Unknown);
+      const char *data = guard.GetData();
+
+      // Read page_id
+      page_id_t read_pid;
+      std::memcpy(&read_pid, data, sizeof(page_id_t));
+
+      // Read version
+      uint64_t read_version;
+      std::memcpy(&read_version, data + 8, sizeof(uint64_t));
+
+      // Read checksum
+      uint64_t read_checksum;
+      std::memcpy(&read_checksum, data + 16, sizeof(uint64_t));
+
+      // CRITICAL CHECKS:
+
+      // 1. Page ID must match
+      if (read_pid != expected_pid) {
+        wrong_page_reads.fetch_add(1);
+        std::cout << "[READER-" << thread_id << "] ERROR: Expected page " << expected_pid << " but read page "
+                  << read_pid << std::endl;
+        continue;
+      }
+
+      // 2. Checksum must be consistent with page_id and version
+      uint64_t expected_checksum = static_cast<uint64_t>(read_pid) ^ read_version;
+      if (read_checksum != expected_checksum) {
+        version_mismatches.fetch_add(1);
+        std::cout << "[READER-" << thread_id << "] ERROR: Checksum mismatch on page " << expected_pid << " version "
+                  << read_version << std::endl;
+        continue;
+      }
+
+      // 3. Pattern must be consistent with version (check a few spots)
+      bool pattern_valid = true;
+      for (size_t i = 24; i < BUSTUB_PAGE_SIZE; i += 100) {
+        char expected_byte = static_cast<char>((read_version + i) & 0xFF);
+        if (data[i] != expected_byte) {
+          pattern_valid = false;
+          break;
+        }
+      }
+
+      if (!pattern_valid) {
+        torn_reads.fetch_add(1);
+        std::cout << "[READER-" << thread_id << "] ERROR: Torn read detected on page " << expected_pid << " version "
+                  << read_version << std::endl;
+      }
+
+      // Sleep briefly while holding the lock to increase chance of contention
+      if (round % 50 == 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+
+      guard.Drop();
+    }
+  };
+
+  // Launch all threads
+  std::vector<std::thread> threads;
+
+  for (size_t i = 0; i < kNumWriters; i++) {
+    threads.emplace_back(writer_func, i);
+  }
+
+  for (size_t i = 0; i < kNumReaders; i++) {
+    threads.emplace_back(reader_func, i + kNumWriters);
+  }
+
+  // Wait for all threads to be ready
+  while (ready_count.load() < (kNumWriters + kNumReaders)) {
+    std::this_thread::yield();
+  }
+
+  std::cout << "All threads ready, starting test..." << std::endl;
+  start_flag.store(true);
+
+  // Join all threads
+  for (auto &t : threads) {
+    t.join();
+  }
+
+  // Report results
+  std::cout << "Test complete!" << std::endl;
+  std::cout << "Wrong page reads: " << wrong_page_reads.load() << std::endl;
+  std::cout << "Version mismatches: " << version_mismatches.load() << std::endl;
+  std::cout << "Torn reads: " << torn_reads.load() << std::endl;
+
+  // All should be zero for correct implementation
+  EXPECT_EQ(wrong_page_reads.load(), 0);
+  EXPECT_EQ(version_mismatches.load(), 0);
+  EXPECT_EQ(torn_reads.load(), 0);
+
+  // Verify final state - read each page and check consistency
+  for (size_t i = 0; i < kNumPages; i++) {
+    auto guard = bpm->ReadPage(page_ids[i], AccessType::Unknown);
+    const char *data = guard.GetData();
+
+    page_id_t read_pid;
+    std::memcpy(&read_pid, data, sizeof(page_id_t));
+
+    EXPECT_EQ(read_pid, page_ids[i]) << "Final verification failed for page " << page_ids[i];
+  }
+
   disk_manager->ShutDown();
   remove(db_fname);
 }

@@ -29,9 +29,9 @@ class IndexIterator {
 
   // Constructor with page_id directly
   template <typename BPMType>
-  IndexIterator(BPMType *bpm, page_id_t page_id, int index, const KeyComparator &comparator)
+  IndexIterator(BPMType *bpm, page_id_t page_id, int index)
       : bpm_(static_cast<void *>(bpm)), page_id_(page_id), index_(index) {
-    (void)comparator;
+    // (void)comparator;
     std::cout << "[Iterator Constructor] bpm=" << bpm_ << " page_id=" << page_id_ << " index=" << index_ << std::endl;
   }
 

@@ -9,7 +9,6 @@
 // Copyright (c) 2015-2025, Carnegie Mellon University Database Group
 //
 //===----------------------------------------------------------------------===//
-
 #include "execution/executors/index_scan_executor.h"
 #include "common/macros.h"
 
@@ -41,9 +40,14 @@ void IndexScanExecutor::Init() {
   index_iterator_ = std::make_unique<BPlusTreeIndexIteratorForTwoIntegerColumn>(tree_->GetBeginIterator());
 }
 
-auto IndexScanExecutor::Next(Tuple *tuple, RID *rid) -> bool {
-  // Iterate through the index entries
-  while (index_iterator_ != nullptr && !index_iterator_->IsEnd()) {
+auto IndexScanExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch,
+                             size_t batch_size) -> bool {
+  // Clear output vectors
+  tuple_batch->clear();
+  rid_batch->clear();
+
+  // Iterate through the index entries until we fill the batch
+  while (tuple_batch->size() < batch_size && index_iterator_ != nullptr && !index_iterator_->IsEnd()) {
     // Get the current key-value pair from the index
     auto entry = **index_iterator_;
     auto current_rid = entry.second;
@@ -63,20 +67,19 @@ auto IndexScanExecutor::Next(Tuple *tuple, RID *rid) -> bool {
     if (plan_->filter_predicate_ != nullptr) {
       auto value = plan_->filter_predicate_->Evaluate(&table_tuple, table_info_->schema_);
 
-      // Skip tuples that don't match the filter (use the same logic as FilterExecutor)
+      // Skip tuples that don't match the filter
       if (value.IsNull() || !value.GetAs<bool>()) {
         continue;
       }
     }
 
-    // Return the tuple and RID
-    *tuple = table_tuple;
-    *rid = current_rid;
-    return true;
+    // Add the tuple and RID to the batch
+    tuple_batch->push_back(table_tuple);
+    rid_batch->push_back(current_rid);
   }
 
-  // No more tuples
-  return false;
+  // Return true if we have any tuples in the batch
+  return !tuple_batch->empty();
 }
 
 }  // namespace bustub

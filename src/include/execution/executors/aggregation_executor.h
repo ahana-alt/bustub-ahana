@@ -61,7 +61,6 @@ class SimpleAggregationHashTable {
     }
     return {values};
   }
-
   /**
    * Combines the input into the aggregation result.
    * @param[out] result The output aggregate value
@@ -71,12 +70,14 @@ class SimpleAggregationHashTable {
     for (uint32_t i = 0; i < agg_exprs_.size(); i++) {
       switch (agg_types_[i]) {
         case AggregationType::CountStarAggregate:
-          // COUNT(*): always increment by 1 for each row
-          result->aggregates_[i] = result->aggregates_[i].Add(ValueFactory::GetIntegerValue(1));
+          if (result->aggregates_[i].IsNull()) {
+            result->aggregates_[i] = ValueFactory::GetIntegerValue(1);
+          } else {
+            result->aggregates_[i] = result->aggregates_[i].Add(ValueFactory::GetIntegerValue(1));
+          }
           break;
 
         case AggregationType::CountAggregate:
-          // COUNT(col): only count non-NULL values
           if (!input.aggregates_[i].IsNull()) {
             if (result->aggregates_[i].IsNull()) {
               result->aggregates_[i] = ValueFactory::GetIntegerValue(1);
@@ -87,7 +88,6 @@ class SimpleAggregationHashTable {
           break;
 
         case AggregationType::SumAggregate:
-          // SUM: add non-NULL values
           if (!input.aggregates_[i].IsNull()) {
             if (result->aggregates_[i].IsNull()) {
               result->aggregates_[i] = input.aggregates_[i];
@@ -98,23 +98,19 @@ class SimpleAggregationHashTable {
           break;
 
         case AggregationType::MinAggregate:
-          // MIN: track minimum non-NULL value
           if (!input.aggregates_[i].IsNull()) {
-            if (result->aggregates_[i].IsNull()) {
+            if (result->aggregates_[i].IsNull() ||
+                result->aggregates_[i].CompareGreaterThan(input.aggregates_[i]) == CmpBool::CmpTrue) {
               result->aggregates_[i] = input.aggregates_[i];
-            } else {
-              result->aggregates_[i] = result->aggregates_[i].Min(input.aggregates_[i]);
             }
           }
           break;
 
         case AggregationType::MaxAggregate:
-          // MAX: track maximum non-NULL value
           if (!input.aggregates_[i].IsNull()) {
-            if (result->aggregates_[i].IsNull()) {
+            if (result->aggregates_[i].IsNull() ||
+                result->aggregates_[i].CompareLessThan(input.aggregates_[i]) == CmpBool::CmpTrue) {
               result->aggregates_[i] = input.aggregates_[i];
-            } else {
-              result->aggregates_[i] = result->aggregates_[i].Max(input.aggregates_[i]);
             }
           }
           break;
@@ -191,18 +187,13 @@ class AggregationExecutor : public AbstractExecutor {
  public:
   AggregationExecutor(ExecutorContext *exec_ctx, const AggregationPlanNode *plan,
                       std::unique_ptr<AbstractExecutor> &&child_executor);
-
   void Init() override;
-
-  auto Next(Tuple *tuple, RID *rid) -> bool override;
-
-  /** @return The output schema for the aggregation */
-  auto GetOutputSchema() const -> const Schema & override { return plan_->OutputSchema(); };
-
+  auto Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch, size_t batch_size)
+      -> bool override;
+  auto GetOutputSchema() const -> const Schema & override { return plan_->OutputSchema(); }
   auto GetChildExecutor() const -> const AbstractExecutor *;
 
  private:
-  /** @return The tuple as an AggregateKey */
   auto MakeAggregateKey(const Tuple *tuple) -> AggregateKey {
     std::vector<Value> keys;
     for (const auto &expr : plan_->GetGroupBys()) {
@@ -211,7 +202,6 @@ class AggregationExecutor : public AbstractExecutor {
     return {keys};
   }
 
-  /** @return The tuple as an AggregateValue */
   auto MakeAggregateValue(const Tuple *tuple) -> AggregateValue {
     std::vector<Value> vals;
     for (const auto &expr : plan_->GetAggregates()) {
@@ -221,18 +211,10 @@ class AggregationExecutor : public AbstractExecutor {
   }
 
  private:
-  /** The aggregation plan node */
   const AggregationPlanNode *plan_;
-
-  /** The child executor that produces tuples over which the aggregation is computed */
   std::unique_ptr<AbstractExecutor> child_executor_;
-
-  /** Simple aggregation hash table */
   SimpleAggregationHashTable aht_;
-
-  /** Simple aggregation hash table iterator */
   SimpleAggregationHashTable::Iterator aht_iterator_;
-
-  bool empty_result_returned_{false};
+  bool has_started_{false};
 };
 }  // namespace bustub

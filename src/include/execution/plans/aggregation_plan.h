@@ -98,12 +98,16 @@ struct AggregateKey {
   std::vector<Value> group_bys_;
 
   /**
-   * Compares two aggregate keys for equality.
+   * Compares two aggregate keys for equality. TODO(p3): you may need to change this to handle NULLs.
    * @param other the other aggregate key to be compared with
    * @return `true` if both aggregate keys have equivalent group-by expressions, `false` otherwise
    */
   auto operator==(const AggregateKey &other) const -> bool {
     for (uint32_t i = 0; i < other.group_bys_.size(); i++) {
+      // For GROUP BY, treat NULL as equal to NULL
+      if (group_bys_[i].IsNull() && other.group_bys_[i].IsNull()) {
+        continue;
+      }
       if (group_bys_[i].CompareEquals(other.group_bys_[i]) != CmpBool::CmpTrue) {
         return false;
       }

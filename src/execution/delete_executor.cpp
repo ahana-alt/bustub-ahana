@@ -43,14 +43,18 @@ void DeleteExecutor::Init() {
 
 /**
  * Yield the number of rows deleted from the table.
- * @param[out] tuple The integer tuple indicating the number of rows deleted from the table
- * @param[out] rid The next tuple RID produced by the delete (ignore, not used)
+ * @param[out] tuple_batch The tuple batch with one integer indicating the number of rows deleted from the table
+ * @param[out] rid_batch The next tuple RID batch produced by the delete (ignore, not used)
+ * @param batch_size The number of tuples to be included in the batch (default: BUSTUB_BATCH_SIZE)
  * @return `true` if a tuple was produced, `false` if there are no more tuples
  *
- * NOTE: DeleteExecutor::Next() does not use the `rid` out-parameter.
+ * NOTE: DeleteExecutor::Next() does not use the `rid_batch` out-parameter.
  * NOTE: DeleteExecutor::Next() returns true with the number of deleted rows produced only once.
  */
-auto DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
+auto DeleteExecutor::Next(std::vector<Tuple> *tuple_batch, std::vector<RID> *rid_batch, size_t batch_size) -> bool {
+  tuple_batch->clear();
+  rid_batch->clear();
+
   // Return false if we've already returned the result
   if (returned_) {
     return false;
@@ -59,11 +63,13 @@ auto DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
   // Collect all tuples first to avoid deadlock
   std::vector<std::pair<Tuple, RID>> tuples_to_delete;
 
-  Tuple child_tuple;
-  RID child_rid;
+  std::vector<Tuple> child_batch;
+  std::vector<RID> child_rid_batch;
 
-  while (child_executor_->Next(&child_tuple, &child_rid)) {
-    tuples_to_delete.emplace_back(child_tuple, child_rid);
+  while (child_executor_->Next(&child_batch, &child_rid_batch, BUSTUB_BATCH_SIZE)) {
+    for (size_t i = 0; i < child_batch.size(); i++) {
+      tuples_to_delete.emplace_back(child_batch[i], child_rid_batch[i]);
+    }
   }
 
   // CRITICAL: Destroy the child executor to release all latches
@@ -101,7 +107,7 @@ auto DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
   // Create the output tuple with the count
   std::vector<Value> values;
   values.emplace_back(TypeId::INTEGER, delete_count);
-  *tuple = Tuple(values, &GetOutputSchema());
+  tuple_batch->push_back(Tuple(values, &GetOutputSchema()));
 
   // Mark that we've returned the result
   returned_ = true;

@@ -30,10 +30,12 @@ void WindowFunctionExecutor::Init() {
   output_index_ = 0;
 
   // Read all tuples from child
-  Tuple tuple;
-  RID rid;
-  while (child_executor_->Next(&tuple, &rid)) {
-    input_tuples_.push_back(tuple);
+  std::vector<Tuple> tuple_batch;
+  std::vector<RID> rid_batch;
+  while (child_executor_->Next(&tuple_batch, &rid_batch, BUSTUB_BATCH_SIZE)) {
+    for (const auto &tuple : tuple_batch) {
+      input_tuples_.push_back(tuple);
+    }
   }
 
   // Compute window functions
@@ -51,7 +53,9 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
   // Check if any window function has ORDER BY
   bool has_order_by = false;
   std::vector<OrderBy> common_order_by;
-  for (const auto &[col_idx, window_func] : plan_->window_functions_) {
+  for (const auto &entry : plan_->window_functions_) {
+    [[maybe_unused]] const auto &col_idx = entry.first;
+    const auto &window_func = entry.second;
     if (!window_func.order_by_.empty()) {
       has_order_by = true;
       common_order_by = window_func.order_by_;
@@ -70,7 +74,7 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
       // Check if this column is a window function (placeholder)
       if (plan_->window_functions_.find(col_idx) != plan_->window_functions_.end()) {
         // This is a window function placeholder - add NULL for now
-        values.push_back(Value(TypeId::INTEGER));
+        values.emplace_back(TypeId::INTEGER);
       } else {
         // This is a regular column - evaluate it
         values.push_back(plan_->columns_[col_idx]->Evaluate(&input_tuple, child_schema));
@@ -81,8 +85,10 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
   }
 
   // Process each window function
-  for (const auto &[col_idx, window_func] : plan_->window_functions_) {
+  for (const auto &entry : plan_->window_functions_) {
     // Create indices for sorting
+    const auto &col_idx = entry.first;
+    const auto &window_func = entry.second;
     std::vector<size_t> indices(input_tuples_.size());
     for (size_t i = 0; i < indices.size(); i++) {
       indices[i] = i;
@@ -108,7 +114,9 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
         }
 
         // Then compare order by keys
-        for (const auto &[order_type, order_expr] : window_func.order_by_) {
+        for (const auto &order_by : window_func.order_by_) {
+          const auto &order_type = std::get<0>(order_by);
+          const auto &order_expr = std::get<2>(order_by);
           auto val_a = order_expr->Evaluate(&tuple_a, child_schema);
           auto val_b = order_expr->Evaluate(&tuple_b, child_schema);
 
@@ -156,7 +164,8 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
           if (i > start) {
             // Check if order by values are the same as previous
             bool same_order = true;
-            for (const auto &[order_type, order_expr] : window_func.order_by_) {
+            for (const auto &order_by : window_func.order_by_) {
+              const auto &order_expr = std::get<2>(order_by);
               auto val_prev = order_expr->Evaluate(&input_tuples_[indices[i - 1]], child_schema);
               auto val_curr = order_expr->Evaluate(&input_tuples_[indices[i]], child_schema);
 
@@ -176,7 +185,7 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
           values.reserve(output_schema.GetColumnCount());
           for (uint32_t j = 0; j < output_schema.GetColumnCount(); j++) {
             if (j == col_idx) {
-              values.push_back(Value(TypeId::INTEGER, rank));
+              values.emplace_back(TypeId::INTEGER, rank);
             } else {
               values.push_back(temp_output_tuples[indices[i]].GetValue(&output_schema, j));
             }
@@ -274,7 +283,9 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
       const auto &tuple_a = input_tuples_[a];
       const auto &tuple_b = input_tuples_[b];
 
-      for (const auto &[order_type, order_expr] : common_order_by) {
+      for (const auto &order_by : common_order_by) {
+        const auto &order_type = std::get<0>(order_by);
+        const auto &order_expr = std::get<2>(order_by);
         auto val_a = order_expr->Evaluate(&tuple_a, child_schema);
         auto val_b = order_expr->Evaluate(&tuple_b, child_schema);
 
@@ -299,16 +310,26 @@ void WindowFunctionExecutor::ComputeWindowFunctions() {
   }
 }
 
-auto WindowFunctionExecutor::Next(Tuple *tuple, RID *rid) -> bool {
-  if (output_index_ >= output_tuples_.size()) {
-    return false;
+/**
+ * Yield the next tuple batch from the window aggregation.
+ * @param[out] tuple_batch The next tuple batch produced by the window aggregation
+ * @param[out] rid_batch The next tuple RID batch produced by the window aggregation
+ * @param batch_size The number of tuples to be included in the batch (default: BUSTUB_BATCH_SIZE)
+ * @return `true` if a tuple was produced, `false` if there are no more tuples
+ */
+auto WindowFunctionExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch,
+                                  size_t batch_size) -> bool {
+  tuple_batch->clear();
+  rid_batch->clear();
+
+  // Return batches from the pre-computed output_tuples_
+  while (output_index_ < output_tuples_.size() && tuple_batch->size() < batch_size) {
+    tuple_batch->push_back(output_tuples_[output_index_]);
+    rid_batch->emplace_back();  // Empty RID
+    output_index_++;
   }
 
-  *tuple = output_tuples_[output_index_];
-  *rid = RID();
-  output_index_++;
-
-  return true;
+  return !tuple_batch->empty();
 }
 
 }  // namespace bustub

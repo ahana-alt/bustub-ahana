@@ -9,7 +9,6 @@
 // Copyright (c) 2015-2025, Carnegie Mellon University Database Group
 //
 //===----------------------------------------------------------------------===//
-
 #include "execution/executors/topn_executor.h"
 #include <algorithm>
 #include <queue>
@@ -43,22 +42,24 @@ void TopNExecutor::Init() {
   std::priority_queue<SortEntry, std::vector<SortEntry>, decltype(heap_cmp)> heap(heap_cmp);
 
   // Process all tuples from child
-  Tuple tuple;
-  RID rid;
-  while (child_executor_->Next(&tuple, &rid)) {
-    auto sort_key = GenerateSortKey(tuple, order_bys, schema);
-    SortEntry entry(sort_key, tuple);
+  std::vector<Tuple> tuple_batch;
+  std::vector<RID> rid_batch;
+  while (child_executor_->Next(&tuple_batch, &rid_batch, BUSTUB_BATCH_SIZE)) {
+    for (const auto &tuple : tuple_batch) {
+      auto sort_key = GenerateSortKey(tuple, order_bys, schema);
+      SortEntry entry(sort_key, tuple);
 
-    if (heap.size() < n) {
-      // Haven't reached N elements yet, just add
-      heap.push(entry);
-    } else {
-      // Heap is full, check if new element should replace top
-      // heap.top() is the "worst" of our current top N
-      // Replace it if the new entry is better
-      if (tuple_cmp(entry, heap.top())) {
-        heap.pop();
+      if (heap.size() < n) {
+        // Haven't reached N elements yet, just add
         heap.push(entry);
+      } else {
+        // Heap is full, check if new element should replace top
+        // heap.top() is the "worst" of our current top N
+        // Replace it if the new entry is better
+        if (tuple_cmp(entry, heap.top())) {
+          heap.pop();
+          heap.push(entry);
+        }
       }
     }
   }
@@ -74,16 +75,26 @@ void TopNExecutor::Init() {
   std::sort(top_entries_.begin(), top_entries_.end(), tuple_cmp);
 }
 
-auto TopNExecutor::Next(Tuple *tuple, RID *rid) -> bool {
-  if (output_index_ >= top_entries_.size()) {
-    return false;
+/**
+ * Yield the next tuple batch from the TopN.
+ * @param[out] tuple_batch The next tuple batch produced by the TopN
+ * @param[out] rid_batch The next tuple RID batch produced by the TopN
+ * @param batch_size The number of tuples to be included in the batch (default: BUSTUB_BATCH_SIZE)
+ * @return `true` if a tuple was produced, `false` if there are no more tuples
+ */
+auto TopNExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch, size_t batch_size)
+    -> bool {
+  tuple_batch->clear();
+  rid_batch->clear();
+
+  // Return batches from the pre-computed top_entries_
+  while (output_index_ < top_entries_.size() && tuple_batch->size() < batch_size) {
+    tuple_batch->push_back(top_entries_[output_index_].second);
+    rid_batch->emplace_back();  // Empty RID
+    output_index_++;
   }
 
-  *tuple = top_entries_[output_index_].second;
-  *rid = RID();
-  output_index_++;
-
-  return true;
+  return !tuple_batch->empty();
 }
 
 auto TopNExecutor::GetNumInHeap() -> size_t { return top_entries_.size(); }

@@ -32,7 +32,7 @@ ReadPageGuard::ReadPageGuard(page_id_t page_id, std::shared_ptr<FrameHeader> fra
       disk_scheduler_(std::move(disk_scheduler)),
       is_valid_(true) {
   if (increment_pin) {
-    frame_->pin_count_.fetch_add(1, std::memory_order_relaxed);
+    frame_->pin_count_.fetch_add(1);
   }
   bpm_lock.unlock();
   rlatch_ = std::shared_lock<std::shared_mutex>(frame_->rwlatch_);
@@ -105,7 +105,7 @@ void ReadPageGuard::Drop() {
   }
 
   std::scoped_lock lk(*bpm_latch_);
-  size_t prev = frame_->pin_count_.fetch_sub(1, std::memory_order_relaxed);
+  size_t prev = frame_->pin_count_.fetch_sub(1);
 
   if (prev == 1) {
     replacer_->SetEvictable(frame_->frame_id_, true);
@@ -206,7 +206,7 @@ void WritePageGuard::Drop() {
   }
 
   std::scoped_lock lk(*bpm_latch_);
-  const size_t prev = frame_->pin_count_.fetch_sub(1, std::memory_order_relaxed);
+  const size_t prev = frame_->pin_count_.fetch_sub(1);
 
   if (prev == 1) {
     replacer_->SetEvictable(frame_->frame_id_, true);

@@ -9,11 +9,9 @@
 // Copyright (c) 2015-2025, Carnegie Mellon University Database Group
 //
 //===----------------------------------------------------------------------===//
-
+#include "execution/executors/insert_executor.h"
 #include <memory>
 #include "common/macros.h"
-
-#include "execution/executors/insert_executor.h"
 
 namespace bustub {
 
@@ -42,14 +40,20 @@ void InsertExecutor::Init() {
 
 /**
  * Yield the number of rows inserted into the table.
- * @param[out] tuple The integer tuple indicating the number of rows inserted into the table
- * @param[out] rid The next tuple RID produced by the insert (ignore, not used)
+ * @param[out] tuple_batch The tuple batch with one integer indicating the number of rows inserted into the table
+ * @param[out] rid_batch The next tuple RID batch produced by the insert (ignore, not used)
+ * @param batch_size The number of tuples to be included in the batch (default: BUSTUB_BATCH_SIZE)
  * @return `true` if a tuple was produced, `false` if there are no more tuples
  *
- * NOTE: InsertExecutor::Next() does not use the `rid` out-parameter.
- * NOTE: InsertExecutor::Next() returns true with number of inserted rows produced only once.
+ * NOTE: InsertExecutor::Next() does not use the `rid_batch` out-parameter.
+ * NOTE: InsertExecutor::Next() returns true with the number of inserted rows produced only once.
  */
-auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
+auto InsertExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch,
+                          size_t batch_size) -> bool {
+  // Clear output vectors
+  tuple_batch->clear();
+  rid_batch->clear();
+
   // Return false if we've already returned the result
   if (returned_) {
     return false;
@@ -61,14 +65,15 @@ auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
   // Get all indexes for this table
   auto indexes = catalog->GetTableIndexes(table_info_->name_);
 
-  // Collect all tuples first
+  // Collect all tuples from child executor (process all batches)
   std::vector<Tuple> tuples_to_insert;
+  std::vector<Tuple> child_batch;
+  std::vector<RID> child_rid_batch;
 
-  Tuple child_tuple;
-  RID child_rid;
-
-  while (child_executor_->Next(&child_tuple, &child_rid)) {
-    tuples_to_insert.push_back(child_tuple);
+  while (child_executor_->Next(&child_batch, &child_rid_batch, BUSTUB_BATCH_SIZE)) {
+    for (const auto &child_tuple : child_batch) {
+      tuples_to_insert.push_back(child_tuple);
+    }
   }
 
   // Counter for inserted rows
@@ -94,7 +99,6 @@ auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
         // Insert the entry into the index
         index_info->index_->InsertEntry(key_tuple, inserted_rid.value(), exec_ctx_->GetTransaction());
       }
-
       insert_count++;
     }
   }
@@ -102,7 +106,7 @@ auto InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
   // Create the output tuple with the count
   std::vector<Value> values;
   values.emplace_back(TypeId::INTEGER, insert_count);
-  *tuple = Tuple(values, &GetOutputSchema());
+  tuple_batch->push_back(Tuple(values, &GetOutputSchema()));
 
   // Mark that we've returned the result
   returned_ = true;

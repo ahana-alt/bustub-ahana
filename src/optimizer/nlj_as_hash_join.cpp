@@ -108,7 +108,7 @@ auto Optimizer::OptimizeNLJAsHashJoin(const AbstractPlanNodeRef &plan) -> Abstra
           right_key_exprs.push_back(right_expr);
         }
 
-        // Create a hash join plan node
+        // Create a hash join plan node (supports INNER and LEFT joins)
         return std::make_shared<HashJoinPlanNode>(nlj_plan.output_schema_, nlj_plan.GetLeftPlan(),
                                                   nlj_plan.GetRightPlan(), std::move(left_key_exprs),
                                                   std::move(right_key_exprs), nlj_plan.GetJoinType());

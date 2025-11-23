@@ -41,19 +41,28 @@ void NestedIndexJoinExecutor::Init() {
   inner_rid_idx_ = 0;
 }
 
-auto NestedIndexJoinExecutor::Next(Tuple *tuple, RID *rid) -> bool {
+auto NestedIndexJoinExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch,
+                                   size_t batch_size) -> bool {
   auto catalog = exec_ctx_->GetCatalog();
   auto index_info = catalog->GetIndex(plan_->GetIndexOid());
   auto inner_table_info = catalog->GetTable(plan_->GetInnerTableOid());
 
-  while (true) {
+  tuple_batch->clear();
+  rid_batch->clear();
+
+  while (tuple_batch->size() < batch_size) {
     // If we've exhausted inner tuples for current outer tuple, get next outer tuple
     if (!has_outer_tuple_ || inner_rid_idx_ >= inner_rids_.size()) {
       // Try to get next outer tuple
-      if (!child_executor_->Next(&outer_tuple_, &outer_rid_)) {
-        return false;  // No more outer tuples
+      std::vector<Tuple> temp_batch;
+      std::vector<RID> temp_rid_batch;
+      if (!child_executor_->Next(&temp_batch, &temp_rid_batch, 1) || temp_batch.empty()) {
+        // No more outer tuples
+        return !tuple_batch->empty();
       }
 
+      outer_tuple_ = temp_batch[0];
+      outer_rid_ = temp_rid_batch[0];
       has_outer_tuple_ = true;
 
       // Construct the probe key from the outer tuple using key_predicate
@@ -83,9 +92,9 @@ auto NestedIndexJoinExecutor::Next(Tuple *tuple, RID *rid) -> bool {
           values.push_back(ValueFactory::GetNullValueByType(inner_table_info->schema_.GetColumn(i).GetType()));
         }
 
-        *tuple = Tuple(values, &plan_->OutputSchema());
-        *rid = outer_rid_;
-        return true;
+        tuple_batch->emplace_back(values, &plan_->OutputSchema());
+        rid_batch->push_back(outer_rid_);
+        continue;
       }
 
       // If no inner tuples and INNER JOIN, continue to next outer tuple
@@ -118,10 +127,11 @@ auto NestedIndexJoinExecutor::Next(Tuple *tuple, RID *rid) -> bool {
       values.push_back(inner_tuple.GetValue(&inner_table_info->schema_, i));
     }
 
-    *tuple = Tuple(values, &plan_->OutputSchema());
-    *rid = outer_rid_;
-    return true;
+    tuple_batch->emplace_back(values, &plan_->OutputSchema());
+    rid_batch->push_back(outer_rid_);
   }
+
+  return !tuple_batch->empty();
 }
 
 }  // namespace bustub

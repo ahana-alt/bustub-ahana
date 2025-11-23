@@ -49,32 +49,40 @@ void NestedLoopJoinExecutor::Init() {
 }
 
 /**
- * Yield the next tuple from the join.
- * @param[out] tuple The next tuple produced by the join
- * @param[out] rid The next tuple RID produced, not used by nested loop join.
- * @return `true` if a tuple was produced, `false` if there are no more tuples.
+ * Yield the next tuple batch from the join.
+ * @param[out] tuple_batch The next tuple batch produced by the join
+ * @param[out] rid_batch The next tuple RID batch produced by the join
+ * @param batch_size The number of tuples to be included in the batch (default: BUSTUB_BATCH_SIZE)
+ * @return `true` if a tuple was produced, `false` if there are no more tuples
  */
-auto NestedLoopJoinExecutor::Next(Tuple *tuple, RID *rid) -> bool {
-  while (true) {
+auto NestedLoopJoinExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch,
+                                  size_t batch_size) -> bool {
+  tuple_batch->clear();
+  rid_batch->clear();
+
+  while (tuple_batch->size() < batch_size) {
     // If we don't have a left tuple, get one
     if (!has_left_tuple_) {
-      if (!left_executor_->Next(&left_tuple_, &left_rid_)) {
-        return false;  // No more left tuples
+      std::vector<Tuple> temp_batch;
+      std::vector<RID> temp_rid_batch;
+      if (!left_executor_->Next(&temp_batch, &temp_rid_batch, 1) || temp_batch.empty()) {
+        // No more left tuples
+        return !tuple_batch->empty();
       }
+      left_tuple_ = temp_batch[0];
+      left_rid_ = temp_rid_batch[0];
       has_left_tuple_ = true;
       left_matched_ = false;
-
       // Reinitialize right executor for the new left tuple
       right_executor_->Init();
     }
 
     // Try to get a right tuple
-    Tuple right_tuple;
-    RID right_rid;
-
-    if (right_executor_->Next(&right_tuple, &right_rid)) {
+    std::vector<Tuple> temp_batch;
+    std::vector<RID> temp_rid_batch;
+    if (right_executor_->Next(&temp_batch, &temp_rid_batch, 1) && !temp_batch.empty()) {
+      Tuple right_tuple = temp_batch[0];
       // We have both left and right tuples, check the join predicate
-
       // Construct a combined tuple for predicate evaluation
       // The predicate expects: left columns followed by right columns
       std::vector<Value> values;
@@ -98,10 +106,10 @@ auto NestedLoopJoinExecutor::Next(Tuple *tuple, RID *rid) -> bool {
 
       if (!predicate_result.IsNull() && predicate_result.GetAs<bool>()) {
         // Predicate evaluates to true, emit the joined tuple
-        *tuple = Tuple(values, &plan_->OutputSchema());
-        *rid = left_rid_;  // Use left RID
+        tuple_batch->emplace_back(values, &plan_->OutputSchema());
+        rid_batch->push_back(left_rid_);  // Use left RID
         left_matched_ = true;
-        return true;
+        continue;
       }
 
       // Predicate was false, continue to next right tuple
@@ -123,17 +131,19 @@ auto NestedLoopJoinExecutor::Next(Tuple *tuple, RID *rid) -> bool {
         values.push_back(ValueFactory::GetNullValueByType(right_executor_->GetOutputSchema().GetColumn(i).GetType()));
       }
 
-      *tuple = Tuple(values, &plan_->OutputSchema());
-      *rid = left_rid_;
+      tuple_batch->emplace_back(values, &plan_->OutputSchema());
+      rid_batch->push_back(left_rid_);
 
       // Move to next left tuple
       has_left_tuple_ = false;
-      return true;
+      continue;
     }
 
     // Move to next left tuple
     has_left_tuple_ = false;
   }
+
+  return !tuple_batch->empty();
 }
 
 }  // namespace bustub

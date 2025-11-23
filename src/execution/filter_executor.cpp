@@ -33,36 +33,69 @@ void FilterExecutor::Init() {
 }
 
 /**
- * Yield the next tuple from the filter.
- * @param[out] tuple The next tuple produced by the filter
- * @param[out] rid The next tuple RID produced by the filter
+ * Yield the next tuple batch from the filter.
+ * @param[out] tuple_batch The next tuple batch produced by the filter
+ * @param[out] rid_batch The next tuple RID batch produced by the filter
+ * @param batch_size The number of tuples to be included in the batch (default: BUSTUB_BATCH_SIZE)
  * @return `true` if a tuple was produced, `false` if there are no more tuples
  */
-auto FilterExecutor::Next(Tuple *tuple, RID *rid) -> bool {
+auto FilterExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch,
+                          size_t batch_size) -> bool {
+  tuple_batch->clear();
+  rid_batch->clear();
+
   auto filter_expr = plan_->GetPredicate();
 
   while (true) {
-    // Get the next tuple
-    const auto status = child_executor_->Next(tuple, rid);
-    if (!status) {
-      std::cout << "FilterExecutor: child returned false, no more tuples" << std::endl;
+    // If the child offset is not zero, process remaining tuples in the last fetched batch
+    if (child_offset_ != 0) {
+      for (size_t i = child_offset_; i < child_tuples_.size(); ++i) {
+        auto &tuple = child_tuples_[i];
+        auto &rid = child_rids_[i];
+        // Evaluate the filter predicate
+        auto value = filter_expr->Evaluate(&tuple, child_executor_->GetOutputSchema());
+        if (filter_expr == nullptr || (!value.IsNull() && value.GetAs<bool>())) {
+          tuple_batch->push_back(tuple);
+          rid_batch->push_back(rid);
+        }
+      }
+    }
+
+    child_offset_ = 0;
+
+    // Get the next tuple batch from the child executor
+    const auto status = child_executor_->Next(&child_tuples_, &child_rids_, batch_size);
+
+    // If no more tuples and output batch is empty, return false
+    if (!status && tuple_batch->empty()) {
       return false;
     }
 
-    // Debug: print the tuple
-    auto v1_value = tuple->GetValue(&child_executor_->GetOutputSchema(), 0);
-    std::cout << "FilterExecutor: evaluating tuple with v1=" << v1_value.ToString() << std::endl;
-
-    auto value = filter_expr->Evaluate(tuple, child_executor_->GetOutputSchema());
-
-    std::cout << "FilterExecutor: predicate result=" << value.ToString() << ", IsNull=" << value.IsNull()
-              << ", GetAs<bool>=" << (value.IsNull() ? "N/A" : (value.GetAs<bool>() ? "true" : "false")) << std::endl;
-
-    if (!value.IsNull() && value.GetAs<bool>()) {
-      std::cout << "FilterExecutor: PASSING tuple" << std::endl;
+    // If no more tuples but output batch is not empty, return true
+    if (!status && !tuple_batch->empty()) {
       return true;
     }
-    std::cout << "FilterExecutor: FILTERING OUT tuple" << std::endl;
+
+    for (size_t i = 0; i < child_tuples_.size(); ++i) {
+      auto &tuple = child_tuples_[i];
+      auto &rid = child_rids_[i];
+      // Evaluate the filter predicate
+      auto value = filter_expr->Evaluate(&tuple, child_executor_->GetOutputSchema());
+      if (filter_expr == nullptr || (!value.IsNull() && value.GetAs<bool>())) {
+        tuple_batch->push_back(tuple);
+        rid_batch->push_back(rid);
+        if (tuple_batch->size() >= batch_size) {
+          // If we have filled the output batch but not yet reached the end of the current child batch, update the
+          // offset
+          if (i + 1 < child_tuples_.size()) {
+            child_offset_ = i + 1;
+          } else {
+            child_offset_ = 0;
+          }
+          return true;
+        }
+      }
+    }
   }
 }
 

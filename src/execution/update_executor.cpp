@@ -9,11 +9,9 @@
 // Copyright (c) 2015-2025, Carnegie Mellon University Database Group
 //
 //===----------------------------------------------------------------------===//
-
+#include "execution/executors/update_executor.h"
 #include <memory>
 #include "common/macros.h"
-
-#include "execution/executors/update_executor.h"
 
 namespace bustub {
 
@@ -41,18 +39,24 @@ void UpdateExecutor::Init() {
 }
 
 /**
- * Yield the next tuple from the update.
- * @param[out] tuple The next tuple produced by the update
- * @param[out] rid The next tuple RID produced by the update (ignore this)
+ * Yield the number of rows updated in the table.
+ * @param[out] tuple_batch The tuple batch with one integer indicating the number of rows updated in the table
+ * @param[out] rid_batch The next tuple RID batch produced by the update (ignore, not used)
+ * @param batch_size The number of tuples to be included in the batch (default: BUSTUB_BATCH_SIZE)
  * @return `true` if a tuple was produced, `false` if there are no more tuples
  *
- * NOTE: UpdateExecutor::Next() does not use the `rid` out-parameter.
+ * NOTE: UpdateExecutor::Next() does not use the `rid_batch` out-parameter.
+ * NOTE: UpdateExecutor::Next() returns true with the number of updated rows produced only once.
  */
-auto UpdateExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
+auto UpdateExecutor::Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch,
+                          size_t batch_size) -> bool {
   // Return false if we've already returned the result
   if (returned_) {
     return false;
   }
+
+  tuple_batch->clear();
+  rid_batch->clear();
 
   // Get catalog to access indexes
   auto catalog = exec_ctx_->GetCatalog();
@@ -64,11 +68,12 @@ auto UpdateExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
   // We must finish iterating before we start modifying table/indexes
   std::vector<std::pair<Tuple, RID>> tuples_to_update;
 
-  Tuple child_tuple;
-  RID child_rid;
-
-  while (child_executor_->Next(&child_tuple, &child_rid)) {
-    tuples_to_update.emplace_back(child_tuple, child_rid);
+  std::vector<Tuple> child_batch;
+  std::vector<RID> child_rid_batch;
+  while (child_executor_->Next(&child_batch, &child_rid_batch, BUSTUB_BATCH_SIZE)) {
+    for (size_t i = 0; i < child_batch.size(); i++) {
+      tuples_to_update.emplace_back(child_batch[i], child_rid_batch[i]);
+    }
   }
 
   // Counter for updated rows
@@ -79,7 +84,6 @@ auto UpdateExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
     // Step 1: Evaluate target expressions to create the new tuple
     std::vector<Value> new_values;
     new_values.reserve(plan_->target_expressions_.size());
-
     for (const auto &expr : plan_->target_expressions_) {
       new_values.push_back(expr->Evaluate(&old_tuple, child_executor_->GetOutputSchema()));
     }
@@ -110,7 +114,6 @@ auto UpdateExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
             new_tuple.KeyFromTuple(table_info_->schema_, index_info->key_schema_, index_info->index_->GetKeyAttrs());
         index_info->index_->InsertEntry(new_key, new_rid.value(), exec_ctx_->GetTransaction());
       }
-
       update_count++;
     }
   }
@@ -118,11 +121,11 @@ auto UpdateExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) -> bool {
   // Create the output tuple with the count
   std::vector<Value> values;
   values.emplace_back(TypeId::INTEGER, update_count);
-  *tuple = Tuple(values, &GetOutputSchema());
+  tuple_batch->emplace_back(values, &GetOutputSchema());
+  rid_batch->emplace_back();  // Empty RID (not used)
 
   // Mark that we've returned the result
   returned_ = true;
-
   return true;
 }
 

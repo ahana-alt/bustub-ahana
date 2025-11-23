@@ -1192,6 +1192,10 @@ void BPLUSTREE_TYPE::Coalesce(WritePageGuard &node_guard, WritePageGuard &siblin
     // std::cout << "[Coalesce] Deleting old root page " << old_root << std::endl;
     bpm_->DeletePage(old_root);
     // Don't put parent_guard back - it's been deleted
+  } else if (parent->GetSize() == 1) {
+    // Size 1 is NEVER valid for non-root internal nodes
+    // Recursively handle this parent
+    CoalesceOrRedistributeInternal(parent_guard, ctx);
   } else if (!parent_is_root && parent->GetSize() < parent->GetMinSize()) {
     // Parent underflow - recursively handle
     // std::cout << "[Coalesce] Parent underflow detected, recursively handling" << std::endl;

@@ -22,11 +22,15 @@
 #include "execution/executors/abstract_executor.h"
 #include "execution/plans/sort_plan.h"
 #include "storage/page/intermediate_result_page.h"
-#include "storage/page/page_guard.h"
 #include "storage/table/tuple.h"
 
 namespace bustub {
 
+/**
+ * A data structure that holds the sorted tuples as a run during external merge sort.
+ * Tuples might be stored in multiple pages, and tuples are ordered both within one page
+ * and across pages.
+ */
 class MergeSortRun {
  public:
   MergeSortRun() = default;
@@ -104,9 +108,20 @@ class ExternalMergeSortExecutor : public AbstractExecutor {
   ExternalMergeSortExecutor(ExecutorContext *exec_ctx, const SortPlanNode *plan,
                             std::unique_ptr<AbstractExecutor> &&child_executor);
 
+  ~ExternalMergeSortExecutor() override {
+    // Clean up final run pages
+    if (final_run_) {
+      auto *bpm = exec_ctx_->GetBufferPoolManager();
+      for (auto page_id : final_run_->GetPages()) {
+        bpm->DeletePage(page_id);
+      }
+    }
+  }
+
   void Init() override;
 
-  auto Next(Tuple *tuple, RID *rid) -> bool override;
+  auto Next(std::vector<bustub::Tuple> *tuple_batch, std::vector<bustub::RID> *rid_batch, size_t batch_size)
+      -> bool override;
 
   auto GetOutputSchema() const -> const Schema & override { return plan_->OutputSchema(); }
 

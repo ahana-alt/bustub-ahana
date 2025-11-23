@@ -122,7 +122,7 @@ auto BufferPoolManager::Size() const -> size_t { return num_frames_; }
  * @return The page ID of the newly allocated page.
  */
 auto BufferPoolManager::NewPage() -> page_id_t {
-  const page_id_t pid = next_page_id_.fetch_add(1, std::memory_order_relaxed);
+  const page_id_t pid = next_page_id_.fetch_add(1);
   return pid;
 }
 
@@ -220,7 +220,7 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
  */
 // ========================= CheckedWritePage =========================
 auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_type) -> std::optional<WritePageGuard> {
-  std::cout << page_id << std::endl;
+  // std::cout << page_id << std::endl;
   // std::cout << "[CheckedWritePage] Acquiring bpm_latch_ (unique)" << std::endl;
   std::unique_lock<std::mutex> lk(*bpm_latch_);
 
@@ -235,7 +235,7 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
 
     // CRITICAL: Increment pin count WHILE holding bpm_latch_
     // This ensures atomicity with SetEvictable
-    frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
+    frame->pin_count_.fetch_add(1);
 
     WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
@@ -259,7 +259,9 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
     replacer_->RecordAccess(fid, page_id, access_type);
     replacer_->SetEvictable(fid, false);
 
-    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
+    frame->pin_count_.fetch_add(1);
+
+    WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
     // lk.unlock();
 
@@ -294,14 +296,17 @@ auto BufferPoolManager::CheckedWritePage(page_id_t page_id, AccessType access_ty
   }
 
   bool was_dirty = frame->is_dirty_;
+
   page_table_.erase(pid);
   // page_table_[page_id] = victim;
 
   replacer_->RecordAccess(victim, page_id, access_type);
   replacer_->SetEvictable(victim, false);
 
+  frame->pin_count_.fetch_add(1);
+
   // Acquire lock, let guard increment pin count
-  WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
+  WritePageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
   // std::cout << "[CheckedWritePage-Case3] Releasing bpm_latch_" << std::endl;
   // lk.unlock();
@@ -369,7 +374,7 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
     replacer_->RecordAccess(fid, page_id, access_type);
     replacer_->SetEvictable(fid, false);
 
-    frame->pin_count_.fetch_add(1, std::memory_order_relaxed);
+    frame->pin_count_.fetch_add(1);
 
     ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
@@ -397,7 +402,9 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
     replacer_->RecordAccess(fid, page_id, access_type);
     replacer_->SetEvictable(fid, false);
 
-    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
+    frame->pin_count_.fetch_add(1);
+
+    ReadPageGuard guard{page_id, frame, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
     // std::cout << "[CheckedReadPage-Case2] Releasing bpm_latch_" << std::endl;
     // lk.unlock();
@@ -442,7 +449,9 @@ auto BufferPoolManager::CheckedReadPage(page_id_t page_id, AccessType access_typ
   replacer_->RecordAccess(victim, page_id, access_type);
   replacer_->SetEvictable(victim, false);
 
-  ReadPageGuard guard{page_id, fh, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, true};
+  fh->pin_count_.fetch_add(1);
+
+  ReadPageGuard guard{page_id, fh, replacer_, bpm_latch_, std::move(lk), disk_scheduler_, false};
 
   // std::cout << "[CheckedReadPage-Case3] Releasing bpm_latch_" << std::endl;
   // lk.unlock();
@@ -701,7 +710,7 @@ auto BufferPoolManager::GetPinCount(page_id_t page_id) -> std::optional<size_t> 
   }
   const frame_id_t fid = it->second;
   const auto &fh = frames_[fid];
-  return fh->pin_count_.load(std::memory_order_relaxed);
+  return fh->pin_count_.load();
 }
 
 }  // namespace bustub

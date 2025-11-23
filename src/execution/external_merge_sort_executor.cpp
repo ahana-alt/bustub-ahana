@@ -24,6 +24,7 @@ template <size_t K>
 ExternalMergeSortExecutor<K>::ExternalMergeSortExecutor(ExecutorContext *exec_ctx, const SortPlanNode *plan,
                                                         std::unique_ptr<AbstractExecutor> &&child_executor)
     : AbstractExecutor(exec_ctx), plan_(plan), cmp_(plan->GetOrderBy()), child_executor_(std::move(child_executor)) {}
+
 template <size_t K>
 void ExternalMergeSortExecutor<K>::Init() {
   child_executor_->Init();
@@ -33,6 +34,7 @@ void ExternalMergeSortExecutor<K>::Init() {
   std::vector<MergeSortRun> runs;
   std::vector<SortEntry> current_page_tuples;
   auto &schema = child_executor_->GetOutputSchema();
+
   // Estimate tuples per page conservatively
   uint32_t tuple_size_est = 0;
   for (uint32_t i = 0; i < schema.GetColumnCount(); i++) {
@@ -42,42 +44,61 @@ void ExternalMergeSortExecutor<K>::Init() {
   if (max_tuples_per_page < 1) {
     max_tuples_per_page = 1;
   }
-  Tuple tuple;
-  RID rid;
-  while (child_executor_->Next(&tuple, &rid)) {
-    auto sort_key = GenerateSortKey(tuple, plan_->GetOrderBy(), schema);
-    current_page_tuples.emplace_back(sort_key, tuple);
-    if (current_page_tuples.size() >= max_tuples_per_page) {
-      runs.push_back(CreateSortedRun(current_page_tuples));
-      current_page_tuples.clear();
+
+  // Create larger runs to reduce merge passes
+  const size_t min_tuples_per_run = max_tuples_per_page * 15;
+
+  // Read all tuples from child in batches
+  std::vector<Tuple> child_batch;
+  std::vector<RID> child_rid_batch;
+  while (child_executor_->Next(&child_batch, &child_rid_batch, BUSTUB_BATCH_SIZE)) {
+    for (const auto &tuple : child_batch) {
+      auto sort_key = GenerateSortKey(tuple, plan_->GetOrderBy(), schema);
+      current_page_tuples.emplace_back(sort_key, tuple);
+      if (current_page_tuples.size() >= min_tuples_per_run) {
+        runs.push_back(CreateSortedRun(current_page_tuples));
+        current_page_tuples.clear();
+      }
     }
   }
+
   if (!current_page_tuples.empty()) {
     runs.push_back(CreateSortedRun(current_page_tuples));
   }
+
   while (runs.size() > 1) {
     runs = MergePass(runs);
   }
+
   if (!runs.empty()) {
     final_run_ = std::make_unique<MergeSortRun>(std::move(runs[0]));
     output_iterator_ = final_run_->Begin();
   }
+
   is_initialized_ = true;
 }
+
 template <size_t K>
-auto ExternalMergeSortExecutor<K>::Next(Tuple *tuple, RID *rid) -> bool {
+auto ExternalMergeSortExecutor<K>::Next(std::vector<Tuple> *tuple_batch, std::vector<RID> *rid_batch, size_t batch_size)
+    -> bool {
+  tuple_batch->clear();
+  rid_batch->clear();
+
   if (!is_initialized_ || !final_run_ || !output_iterator_.has_value()) {
     return false;
   }
+
   auto end_iter = final_run_->End();
-  if (*output_iterator_ != end_iter) {
-    *tuple = **output_iterator_;
-    *rid = RID();
+
+  while (tuple_batch->size() < batch_size && *output_iterator_ != end_iter) {
+    tuple_batch->push_back(**output_iterator_);
+    rid_batch->push_back(RID());
     ++(*output_iterator_);
-    return true;
   }
-  return false;
+
+  return !tuple_batch->empty();
 }
+
 template <size_t K>
 auto ExternalMergeSortExecutor<K>::CreateSortedRun(std::vector<SortEntry> &entries) -> MergeSortRun {
   std::sort(entries.begin(), entries.end(), cmp_);
@@ -90,9 +111,7 @@ auto ExternalMergeSortExecutor<K>::CreateSortedRun(std::vector<SortEntry> &entri
   pages.push_back(page_id);
   for (const auto &entry : entries) {
     if (!page->Insert(entry.second)) {
-      // Drop current guard (unpins the page)
       page_guard.Drop();
-      // Create new page
       page_id = bpm->NewPage();
       page_guard = bpm->WritePage(page_id);
       page = page_guard.AsMut<IntermediateResultPage>();
@@ -103,31 +122,36 @@ auto ExternalMergeSortExecutor<K>::CreateSortedRun(std::vector<SortEntry> &entri
       }
     }
   }
-  // Guard automatically unpins when it goes out of scope
   page_guard.Drop();
   return {pages, bpm};
 }
+
 template <size_t K>
 auto ExternalMergeSortExecutor<K>::MergePass(std::vector<MergeSortRun> &runs) -> std::vector<MergeSortRun> {
   std::vector<MergeSortRun> merged_runs;
-  for (size_t i = 0; i + 1 < runs.size(); i += K) {
+  auto *bpm = exec_ctx_->GetBufferPoolManager();
+
+  for (size_t i = 0; i < runs.size(); i += K) {
     std::vector<MergeSortRun> runs_to_merge;
     for (size_t j = 0; j < K && i + j < runs.size(); j++) {
       runs_to_merge.push_back(std::move(runs[i + j]));
     }
-    merged_runs.push_back(MergeRuns(runs_to_merge));
-  }
-  if (runs.size() % K != 0) {
-    merged_runs.push_back(std::move(runs.back()));
-  }
-  auto *bpm = exec_ctx_->GetBufferPoolManager();
-  for (auto &run : runs) {
-    for (auto page_id : run.GetPages()) {
-      bpm->DeletePage(page_id);
+
+    if (runs_to_merge.size() > 1) {
+      merged_runs.push_back(MergeRuns(runs_to_merge));
+      for (auto &run : runs_to_merge) {
+        for (auto page_id : run.GetPages()) {
+          bpm->DeletePage(page_id);
+        }
+      }
+    } else {
+      merged_runs.push_back(std::move(runs_to_merge[0]));
     }
   }
+
   return merged_runs;
 }
+
 template <size_t K>
 auto ExternalMergeSortExecutor<K>::MergeRuns(std::vector<MergeSortRun> &runs_to_merge) -> MergeSortRun {
   auto *bpm = exec_ctx_->GetBufferPoolManager();
@@ -162,9 +186,7 @@ auto ExternalMergeSortExecutor<K>::MergeRuns(std::vector<MergeSortRun> &runs_to_
     auto item = pq.top();
     pq.pop();
     if (!page->Insert(item.entry_.second)) {
-      // Drop current guard
       page_guard.Drop();
-      // Create new page
       page_id = bpm->NewPage();
       page_guard = bpm->WritePage(page_id);
       page = page_guard.AsMut<IntermediateResultPage>();
@@ -182,9 +204,9 @@ auto ExternalMergeSortExecutor<K>::MergeRuns(std::vector<MergeSortRun> &runs_to_
       ++iterators[run_idx];
     }
   }
-  // Guard automatically unpins when it goes out of scope
   page_guard.Drop();
   return {merged_pages, bpm};
 }
+
 template class ExternalMergeSortExecutor<2>;
 }  // namespace bustub

@@ -32,15 +32,15 @@ INDEXITERATOR_TYPE::IndexIterator() : initialized_(true) {
  */
 FULL_INDEX_TEMPLATE_ARGUMENTS
 void INDEXITERATOR_TYPE::Initialize() const {
-  std::cout << "[Iterator::Initialize] initialized_=" << initialized_ << " bpm_=" << bpm_ << " page_id_=" << page_id_
-            << " index_=" << index_ << std::endl;
+  // std::cout << "[Iterator::Initialize] initialized_=" << initialized_ << " bpm_=" << bpm_ << " page_id_=" << page_id_
+  //           << " index_=" << index_ << std::endl;
 
   if (!initialized_ && bpm_ != nullptr) {
-    std::cout << "[Iterator::Initialize] Calling AdvanceToValidEntry()" << std::endl;
+    // std::cout << "[Iterator::Initialize] Calling AdvanceToValidEntry()" << std::endl;
     initialized_ = true;
     const_cast<IndexIterator *>(this)->AdvanceToValidEntry();
-    std::cout << "[Iterator::Initialize] After AdvanceToValidEntry: page_id_=" << page_id_ << " index_=" << index_
-              << std::endl;
+    // std::cout << "[Iterator::Initialize] After AdvanceToValidEntry: page_id_=" << page_id_ << " index_=" << index_
+    //           << std::endl;
   }
 }
 
@@ -80,10 +80,10 @@ void INDEXITERATOR_TYPE::AdvanceToValidEntry() {
  */
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto INDEXITERATOR_TYPE::IsEnd() -> bool {
-  std::cout << "[Iterator::IsEnd] Before Initialize" << std::endl;
+  // std::cout << "[Iterator::IsEnd] Before Initialize" << std::endl;
   Initialize();
   bool result = page_id_ == INVALID_PAGE_ID;
-  std::cout << "[Iterator::IsEnd] result=" << result << " page_id_=" << page_id_ << std::endl;
+  // std::cout << "[Iterator::IsEnd] result=" << result << " page_id_=" << page_id_ << std::endl;
   return result;
 }
 
@@ -107,14 +107,14 @@ auto INDEXITERATOR_TYPE::operator*() -> std::pair<KeyType, ValueType> {
  */
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto INDEXITERATOR_TYPE::operator++() -> INDEXITERATOR_TYPE & {
-  std::cout << "[Iterator::operator++] Before: page_id_=" << page_id_ << " index_=" << index_ << std::endl;
+  // std::cout << "[Iterator::operator++] Before: page_id_=" << page_id_ << " index_=" << index_ << std::endl;
   Initialize();
 
   index_++;
-  std::cout << "[Iterator::operator++] After index++: index_=" << index_ << std::endl;
+  // std::cout << "[Iterator::operator++] After index++: index_=" << index_ << std::endl;
   AdvanceToValidEntry();
-  std::cout << "[Iterator::operator++] After AdvanceToValidEntry: page_id_=" << page_id_ << " index_=" << index_
-            << std::endl;
+  // std::cout << "[Iterator::operator++] After AdvanceToValidEntry: page_id_=" << page_id_ << " index_=" << index_
+  //           << std::endl;
 
   return *this;
 }
@@ -127,8 +127,9 @@ auto INDEXITERATOR_TYPE::operator==(const INDEXITERATOR_TYPE &other) const -> bo
   Initialize();  // Initialize this iterator first
   other.Initialize();
   bool result = page_id_ == other.page_id_ && index_ == other.index_;
-  std::cout << "[Iterator::operator==] this: page_id_=" << page_id_ << " index_=" << index_
-            << " other: page_id_=" << other.page_id_ << " index_=" << other.index_ << " result=" << result << std::endl;
+  // std::cout << "[Iterator::operator==] this: page_id_=" << page_id_ << " index_=" << index_
+  //           << " other: page_id_=" << other.page_id_ << " index_=" << other.index_ << " result=" << result <<
+  //           std::endl;
   return result;
 }
 
@@ -138,7 +139,7 @@ auto INDEXITERATOR_TYPE::operator==(const INDEXITERATOR_TYPE &other) const -> bo
 FULL_INDEX_TEMPLATE_ARGUMENTS
 auto INDEXITERATOR_TYPE::operator!=(const INDEXITERATOR_TYPE &other) const -> bool {
   bool result = !(*this == other);
-  std::cout << "[Iterator::operator!=] result=" << result << std::endl;
+  // std::cout << "[Iterator::operator!=] result=" << result << std::endl;
   return result;
 }
 

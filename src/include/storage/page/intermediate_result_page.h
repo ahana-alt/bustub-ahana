@@ -17,9 +17,11 @@
 #include <vector>
 #include "common/config.h"
 #include "storage/table/tuple.h"
-
 namespace bustub {
-
+/**
+ * Page to hold the intermediate data for external merge sort and hash join.
+ * Supports variable-length tuples.
+ */
 class IntermediateResultPage {
  public:
   void Init() {
@@ -57,11 +59,12 @@ class IntermediateResultPage {
 
   auto GetTuple(uint32_t index) const -> Tuple {
     BUSTUB_ASSERT(index < GetTupleCount(), "Tuple index out of bounds");
-    auto offset = GetOffset(index);
 
+    auto offset = GetOffset(index);
     Tuple tuple;
     // DeserializeFrom expects size header followed by data
     tuple.DeserializeFrom(GetData() + offset);
+
     return tuple;
   }
 
@@ -76,6 +79,7 @@ class IntermediateResultPage {
     if (used_space_end <= used_space_start) {
       return 0;
     }
+
     return used_space_end - used_space_start;
   }
 
@@ -101,5 +105,4 @@ class IntermediateResultPage {
 
   char data_[BUSTUB_PAGE_SIZE]{};
 };
-
 }  // namespace bustub
